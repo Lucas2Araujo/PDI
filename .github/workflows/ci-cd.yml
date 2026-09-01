@@ -1,0 +1,85 @@
+name: CI/CD Pipeline - Testes & Deploy Web
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: 🧪 Executar Suíte de Testes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Executar Testes Unitários e de Integração
+        run: |
+          python -m unittest discover -s tests -v
+
+  deploy-web:
+    name: 🚀 Build & Deploy Web no GitHub Pages
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar Dependências e Flet CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flet-cli
+
+      - name: Compilar Versão Web Estática do App
+        run: |
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          echo "Compilando Flet Web para base-url: /${REPO_NAME}/"
+          flet build web --base-url "/${REPO_NAME}/" --route-url-strategy hash
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Fazer Upload do Artefato Web
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "build/web"
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

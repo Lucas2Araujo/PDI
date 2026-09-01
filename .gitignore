@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+
+# Ambiente virtual
+.venv/
+venv/
+env/
+ENV/
+
+# Outputs gerados pelo projeto (resultados de testes/experimentos)
+teste_quantiza*.png
+teste_cinza*.jpg
+*_uniforme_*.png
+*_kmeans_*.png
+*_comparativo_*.png
+*_cinza_manual.jpg
+comparacao_histogramas_*.png
+
+# IDEs e editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Distribuição Python
+dist/
+build/
+*.egg-info/
+
+# Flet
+.flet/
+
