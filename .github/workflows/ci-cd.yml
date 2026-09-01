@@ -78,6 +78,28 @@ jobs:
           echo "Compilando Flet Web para base-url: /${REPO_NAME}/"
           flet build web --base-url "/${REPO_NAME}/" --route-url-strategy hash --yes
 
+      - name: Sincronizar Assets, Favicon e Configurações no Build Web
+        run: |
+          echo "Sincronizando assets, favicon e configurações do web build..."
+          mkdir -p build/web/assets
+          cp -rf assets/* build/web/assets/
+          
+          # Sobrescreve favicon e ícones no diretório raiz do web build
+          cp -f assets/favicon.png build/web/favicon.png
+          cp -f assets/favicon.ico build/web/favicon.ico 2>/dev/null || true
+          
+          # Sincroniza ícones do PWA
+          if [ -d "assets/icons" ]; then
+            mkdir -p build/web/icons
+            cp -rf assets/icons/* build/web/icons/
+          fi
+          
+          # Garante que o GitHub Pages/Jekyll não ignore arquivos WASM/dotfiles
+          touch build/web/.nojekyll
+          
+          echo "Estrutura final de build/web:"
+          ls -la build/web
+
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
 

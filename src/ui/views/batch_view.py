@@ -45,7 +45,12 @@ from src.core.quantization import (
     QuantizationTechnique,
     technique_label,
 )
-from src.core.samples import ASSETS_DIR, SAMPLE_OPTIONS
+from src.core.samples import (
+    ASSETS_DIR,
+    SAMPLE_OPTIONS,
+    get_sample_path,
+    load_sample_bytes,
+)
 from src.ui import theme
 from src.ui.common import (
     _GRAYSCALE_DETAILS,
@@ -689,30 +694,35 @@ class BatchView(ft.Column):
     # -----------------------------------------------------------------------
 
     def _on_select_sample_batch(self, _: ft.ControlEvent) -> None:
-        """Carrega as 5 imagens de amostra embutidas no app."""
-        sample_paths = [
-            ASSETS_DIR / s["name"]
-            for s in SAMPLE_OPTIONS
-            if (ASSETS_DIR / s["name"]).exists()
-        ]
-        if not sample_paths:
+        """Carrega as 5 imagens de amostra embutidas no app com suporte a Web e Desktop."""
+        sample_items: list[tuple[str, Path, bytes]] = []
+        for s in SAMPLE_OPTIONS:
+            name = s["name"]
+            try:
+                p = get_sample_path(name)
+                b = load_sample_bytes(name)
+                sample_items.append((name, p, b))
+            except Exception:
+                continue
+
+        if not sample_items:
             self._image_count_text.value = "⚠️  Nenhuma imagem de amostra encontrada na pasta assets."
             self._image_count_text.color = theme.WARNING
             self._show_message("Nenhuma imagem de amostra encontrada na pasta assets.", theme.WARNING)
             self._page.update()
             return
 
-        self._selected_images = sample_paths
-        self._web_file_data = []
+        self._selected_images = [p for _, p, _ in sample_items]
+        self._web_file_data = [(name, b) for name, _, b in sample_items]
         self._input_dir = None
 
         self._queue_items = [
-            _BatchQueueItem(name=p.name, path=p)
-            for p in sample_paths
+            _BatchQueueItem(name=name, path=p, raw_bytes=b)
+            for name, p, b in sample_items
         ]
 
         self._input_label.value = (
-            f"Amostras do App ({len(sample_paths)} imagens: Retrato, Benchmark, Lena, Ayla, Pentágono)"
+            f"Amostras do App ({len(sample_items)} imagens: Retrato, Benchmark, Lena, Ayla, Pentágono)"
         )
         self._input_label.italic = False
         self._input_label.color = theme.TEXT_PRIMARY
@@ -723,11 +733,11 @@ class BatchView(ft.Column):
             self._output_label.italic = False
             self._output_label.color = theme.TEXT_PRIMARY
 
-        self._image_count_text.value = f"✅  {len(sample_paths)} imagens carregadas e prontas para quantização."
+        self._image_count_text.value = f"✅  {len(sample_items)} imagens carregadas e prontas para quantização."
         self._image_count_text.color = theme.SUCCESS
 
         self._render_queue_preview()
-        self._show_message(f"✅ {len(sample_paths)} imagens carregadas na fila! Clique no botão verde 'Iniciar' para quantizar.")
+        self._show_message(f"✅ {len(sample_items)} imagens carregadas na fila! Clique no botão verde 'Iniciar' para quantizar.")
 
     async def _on_select_input_dir(self, _: ft.ControlEvent) -> None:
         """Desktop: abre diálogo para selecionar pasta inteira."""

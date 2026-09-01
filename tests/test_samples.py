@@ -66,6 +66,24 @@ class TestSamples(unittest.TestCase):
             b = load_sample_bytes(opt["name"])
             self.assertTrue(b.startswith(self.PNG_MAGIC), f"Header PNG inválido para {opt['name']}")
 
+    def test_assets_dir_fallback_and_environment(self) -> None:
+        import os
+        from src.core.samples import _find_assets_dir, ASSETS_DIR
+        self.assertTrue(ASSETS_DIR.exists())
+        self.assertTrue((ASSETS_DIR / SAMPLE_PORTRAIT_NAME).exists())
+
+        # Teste com FLET_ASSETS_DIR definido
+        old_env = os.environ.get("FLET_ASSETS_DIR")
+        try:
+            os.environ["FLET_ASSETS_DIR"] = str(ASSETS_DIR)
+            resolved = _find_assets_dir()
+            self.assertEqual(resolved, ASSETS_DIR)
+        finally:
+            if old_env is not None:
+                os.environ["FLET_ASSETS_DIR"] = old_env
+            else:
+                os.environ.pop("FLET_ASSETS_DIR", None)
+
 
 if __name__ == "__main__":
     unittest.main()

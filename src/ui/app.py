@@ -119,9 +119,9 @@ def _configure_page(page: ft.Page) -> None:
         page.window.min_height = 500
 
         # Ícone da janela Desktop nativa
-        assets_dir = Path(__file__).resolve().parent.parent.parent / "assets"
-        ico_file = assets_dir / "favicon.ico"
-        png_file = assets_dir / "favicon.png"
+        from src.core.samples import ASSETS_DIR
+        ico_file = ASSETS_DIR / "favicon.ico"
+        png_file = ASSETS_DIR / "favicon.png"
         if ico_file.exists():
             page.window.icon = str(ico_file)
         elif png_file.exists():
@@ -148,9 +148,24 @@ def _get_header_padding(width: float | None) -> ft.Padding | int:
 
 def _create_app_logo() -> ft.Container:
     """Cria o componente visual do logo da aplicação com fallback."""
+    data_src = "favicon.png"
+    try:
+        from src.core.samples import ASSETS_DIR
+        png_path = ASSETS_DIR / "favicon.png"
+        if not png_path.exists():
+            alt_path = Path(__file__).resolve().parent.parent / "assets" / "favicon.png"
+            if alt_path.exists():
+                png_path = alt_path
+        if png_path.exists():
+            import base64
+            encoded = base64.b64encode(png_path.read_bytes()).decode("ascii")
+            data_src = f"data:image/png;base64,{encoded}"
+    except Exception:
+        data_src = "favicon.png"
+
     return ft.Container(
         content=ft.Image(
-            src="/favicon.png",
+            src=data_src,
             width=36,
             height=36,
             fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,

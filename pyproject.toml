@@ -1,0 +1,29 @@
+[project]
+name = "pdi-quantizacao"
+version = "0.3.0"
+description = "Interface Gráfica e Pipeline de Quantização de Imagens em PDI"
+authors = [
+    { name = "Lucas Araujo" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flet>=0.86.0",
+    "numpy>=1.24.0",
+    "pillow>=10.0.0",
+    "scikit-image>=0.22.0",
+    "scikit-learn>=1.3.0",
+    "matplotlib>=3.7.0",
+    "tifffile>=2023.7.10",
+]
+
+[tool.flet]
+product = "PDI — Quantização de Imagens"
+company = "UFMA"
+copyright = "Lucas Araujo"
+
+[tool.flet.app]
+path = "."
+
+[tool.flet.web]
+route_url_strategy = "hash"
