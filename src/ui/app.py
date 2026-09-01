@@ -18,7 +18,7 @@ from src.ui.views.batch_view import BatchView
 from src.ui.views.single_view import SingleView
 
 # Versão atual do aplicativo
-APP_VERSION = "0.1"
+APP_VERSION = "0.3"
 APP_TITLE = "PDI — Quantização de Imagens"
 
 
@@ -41,14 +41,17 @@ def build_app(page: ft.Page) -> None:
     t1 = ft.Tab(label="Imagem Individual", icon=ft.Icons.IMAGE)
     t2 = ft.Tab(label="Processamento em Lote", icon=ft.Icons.BURST_MODE)
 
+    p_w = getattr(page, "width", None)
+    p_h = getattr(page, "height", None)
+
     v1 = ft.Container(
         content=single_view,
-        padding=theme.PADDING_PAGE,
+        padding=theme.get_page_padding(p_w),
         expand=True,
     )
     v2 = ft.Container(
         content=batch_view,
-        padding=theme.PADDING_PAGE,
+        padding=theme.get_page_padding(p_w),
         expand=True,
     )
 
@@ -65,11 +68,35 @@ def build_app(page: ft.Page) -> None:
         ),
     )
 
+    header_container, update_header_layout = _build_header(page)
+
+    def _on_page_resize(_: ft.ControlEvent) -> None:
+        cur_w = getattr(page, "width", None)
+        cur_h = getattr(page, "height", None)
+        pad = theme.get_page_padding(cur_w)
+        v1.padding = pad
+        v2.padding = pad
+        update_header_layout(cur_w)
+        if hasattr(single_view, "update_responsive_layout"):
+            single_view.update_responsive_layout(cur_w, cur_h)
+        if hasattr(batch_view, "update_responsive_layout"):
+            batch_view.update_responsive_layout(cur_w, cur_h)
+        page.update()
+
+    page.on_resized = _on_page_resize
+
     page.add(
-        _build_header(page),
+        header_container,
         ft.Divider(height=1),
         tabs,
     )
+
+    # Inicializa layout responsivo nas views e no cabeçalho
+    update_header_layout(p_w)
+    if hasattr(single_view, "update_responsive_layout"):
+        single_view.update_responsive_layout(p_w, p_h)
+    if hasattr(batch_view, "update_responsive_layout"):
+        batch_view.update_responsive_layout(p_w, p_h)
 
 
 # ---------------------------------------------------------------------------
@@ -86,10 +113,10 @@ def _configure_page(page: ft.Page) -> None:
     page.padding = 0
     page.spacing = 0
     if hasattr(page, "window") and page.window is not None:
-        page.window.width = 1100
+        page.window.width = 1200
         page.window.height = 860
-        page.window.min_width = 800
-        page.window.min_height = 600
+        page.window.min_width = 400
+        page.window.min_height = 500
 
         # Ícone da janela Desktop nativa
         assets_dir = Path(__file__).resolve().parent.parent.parent / "assets"
@@ -101,44 +128,27 @@ def _configure_page(page: ft.Page) -> None:
             page.window.icon = str(png_file)
 
 
-def _build_header(page: ft.Page) -> ft.Container:
-    """
-    Constrói a barra de cabeçalho da aplicação com logo oficial, título,
-    badge de versão e seletor interativo de tema (Automático / Claro / Escuro).
+_THEME_MODE_MAP: dict[str, ft.ThemeMode] = {
+    "light": ft.ThemeMode.LIGHT,
+    "dark": ft.ThemeMode.DARK,
+    "system": ft.ThemeMode.SYSTEM,
+}
 
-    Args:
-        page: Instância da página Flet para alternância dinâmica de tema.
 
-    Returns:
-        Container Flet com o header estilizado e adaptativo.
-    """
-    title = ft.Text(
-        APP_TITLE,
-        size=theme.FONT_HEADLINE,
-        weight=ft.FontWeight.BOLD,
-        color=ft.Colors.ON_SURFACE,
+def _get_header_padding(width: float | None) -> ft.Padding | int:
+    """Retorna o padding responsivo do cabeçalho isolando a verificação de compatibilidade."""
+    if not hasattr(ft, "Padding"):
+        return 10
+    is_mob = theme.is_mobile(width)
+    return ft.Padding.symmetric(
+        horizontal=theme.get_page_padding(width),
+        vertical=8 if is_mob else 12,
     )
 
-    version_badge = ft.Container(
-        content=ft.Text(
-            f"v{APP_VERSION}",
-            size=theme.FONT_CAPTION,
-            color=theme.PRIMARY_LIGHT,
-            weight=ft.FontWeight.BOLD,
-        ),
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-        border_radius=6,
-        padding=ft.Padding.symmetric(horizontal=8, vertical=4) if hasattr(ft, "Padding") else 6,
-    )
 
-    subtitle = ft.Text(
-        "Processamento Digital de Imagens • UFMA",
-        size=theme.FONT_CAPTION,
-        color=ft.Colors.ON_SURFACE_VARIANT,
-    )
-
-    # Logo do aplicativo com fallback para ícone gradiente
-    app_logo = ft.Container(
+def _create_app_logo() -> ft.Container:
+    """Cria o componente visual do logo da aplicação com fallback."""
+    return ft.Container(
         content=ft.Image(
             src="/favicon.png",
             width=36,
@@ -151,21 +161,32 @@ def _build_header(page: ft.Page) -> ft.Container:
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
     )
 
-    # Seletor de Tema (Sistema / Claro / Escuro)
+
+def _create_version_badge() -> ft.Container:
+    """Cria o badge com a versão atual da aplicação."""
+    return ft.Container(
+        content=ft.Text(
+            f"v{APP_VERSION}",
+            size=theme.FONT_CAPTION,
+            color=theme.PRIMARY_LIGHT,
+            weight=ft.FontWeight.BOLD,
+        ),
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        border_radius=6,
+        padding=ft.Padding.symmetric(horizontal=8, vertical=4) if hasattr(ft, "Padding") else 6,
+    )
+
+
+def _create_theme_selector(page: ft.Page) -> ft.SegmentedButton:
+    """Cria o seletor segmentado para alternância de tema (Auto / Claro / Escuro)."""
     def _on_theme_change(e: ft.ControlEvent) -> None:
-        selected = e.control.selected
-        if not selected:
+        if not e.control.selected:
             return
-        mode_str = next(iter(selected))
-        if mode_str == "light":
-            page.theme_mode = ft.ThemeMode.LIGHT
-        elif mode_str == "dark":
-            page.theme_mode = ft.ThemeMode.DARK
-        else:
-            page.theme_mode = ft.ThemeMode.SYSTEM
+        mode_str = next(iter(e.control.selected), "system")
+        page.theme_mode = _THEME_MODE_MAP.get(mode_str, ft.ThemeMode.SYSTEM)
         page.update()
 
-    theme_selector = ft.SegmentedButton(
+    return ft.SegmentedButton(
         segments=[
             ft.Segment(
                 value="system",
@@ -188,30 +209,86 @@ def _build_header(page: ft.Page) -> ft.Container:
         show_selected_icon=False,
     )
 
-    return ft.Container(
-        content=ft.Row(
-            controls=[
-                ft.Row(
-                    controls=[
-                        app_logo,
-                        ft.Column(
-                            controls=[
-                                ft.Row(controls=[title, version_badge], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                                subtitle,
-                            ],
-                            spacing=2,
-                        ),
-                    ],
-                    spacing=14,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                theme_selector,
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
-        bgcolor=ft.Colors.SURFACE_CONTAINER,
-        padding=ft.Padding.symmetric(horizontal=theme.PADDING_PAGE, vertical=14) if hasattr(ft, "Padding") else 14,
+
+def _build_brand_section(
+    title: ft.Text,
+    version_badge: ft.Container,
+    subtitle: ft.Text,
+    app_logo: ft.Container,
+    spacing: int = 12,
+) -> ft.Row:
+    """Monta a seção de identidade visual (logo + títulos)."""
+    return ft.Row(
+        controls=[
+            app_logo,
+            ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[title, version_badge],
+                        spacing=spacing // 2,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
+                    ),
+                    subtitle,
+                ],
+                spacing=2,
+                expand=True,
+            ),
+        ],
+        spacing=spacing,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
+
+
+def _build_header(page: ft.Page) -> tuple[ft.Container, any]:
+    """
+    Constrói a barra de cabeçalho da aplicação com logo oficial, título,
+    badge de versão e seletor interativo de tema, com suporte a layout responsivo.
+    """
+    title = ft.Text(
+        APP_TITLE,
+        size=theme.FONT_HEADLINE,
+        weight=ft.FontWeight.BOLD,
+        color=ft.Colors.ON_SURFACE,
+    )
+    version_badge = _create_version_badge()
+    subtitle = ft.Text(
+        "Processamento Digital de Imagens • UFMA",
+        size=theme.FONT_CAPTION,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+    )
+    app_logo = _create_app_logo()
+    theme_selector = _create_theme_selector(page)
+    brand_section = _build_brand_section(title, version_badge, subtitle, app_logo)
+
+    header_container = ft.Container(
+        bgcolor=ft.Colors.SURFACE_CONTAINER,
+        padding=_get_header_padding(getattr(page, "width", None)),
+    )
+
+    def _update_header_layout(width: float | None) -> None:
+        is_mob = theme.is_mobile(width)
+        title.size = theme.FONT_SUBTITLE if is_mob else theme.FONT_HEADLINE
+        header_container.padding = _get_header_padding(width)
+
+        if is_mob:
+            header_container.content = ft.Column(
+                controls=[
+                    brand_section,
+                    ft.Row(controls=[theme_selector], alignment=ft.MainAxisAlignment.CENTER),
+                ],
+                spacing=8,
+            )
+        else:
+            header_container.content = ft.Row(
+                controls=[brand_section, theme_selector],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=10,
+            )
+
+    _update_header_layout(getattr(page, "width", None))
+    return header_container, _update_header_layout
+
 
 

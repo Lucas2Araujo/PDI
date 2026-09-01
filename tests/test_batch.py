@@ -9,7 +9,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from src.core.batch import BatchResult, discover_images, process_batch
+from src.core.batch import (
+    BatchResult,
+    discover_images,
+    process_batch,
+    process_bytes_list,
+)
 from src.core.grayscale import GrayscaleMethod
 from src.core.quantization import QuantizationTechnique
 
@@ -93,5 +98,92 @@ class TestProcessBatch(unittest.TestCase):
         self.assertEqual(len(outputs), 2)
 
 
+class TestProcessBytesList(unittest.TestCase):
+    """Suíte de testes para processamento em lote puramente em memória (Web mode)."""
+
+    def test_process_bytes_list_success_and_failures(self) -> None:
+        import io
+
+        # Cria imagem válida em memória
+        img_arr = np.random.randint(0, 256, (16, 16, 3), dtype=np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(img_arr).save(buf, format="PNG")
+        valid_bytes = buf.getvalue()
+
+        # Lista de teste com 1 válida e 1 inválida
+        items = [
+            ("foto1.png", valid_bytes),
+            ("invalido.png", b"BYTES_INVALIDOS"),
+        ]
+
+        progress_calls = []
+
+        def _callback(curr: int, total: int, filename: str) -> None:
+            progress_calls.append((curr, total, filename))
+
+        results, failures = process_bytes_list(
+            images=items,
+            technique=QuantizationTechnique.UNIFORM,
+            bits=4,
+            grayscale_method=GrayscaleMethod.LUMINANCE,
+            progress_callback=_callback,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(len(progress_calls), 2)
+        self.assertTrue(results[0][0].endswith(".png"))
+        self.assertGreater(len(results[0][1]), 0)
+        self.assertEqual(failures[0][0], "invalido.png")
+
+    def test_process_bytes_batch_rich_results(self) -> None:
+        import io
+        from src.core.batch import process_bytes_batch, BatchItemResult
+
+        img_arr = np.random.randint(0, 256, (16, 16, 3), dtype=np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(img_arr).save(buf, format="PNG")
+        valid_bytes = buf.getvalue()
+
+        items = [
+            ("amostra.png", valid_bytes),
+            ("corrompida.png", b"CORROMPIDO"),
+        ]
+
+        batch_res = process_bytes_batch(
+            images=items,
+            technique=QuantizationTechnique.UNIFORM,
+            bits=4,
+            grayscale_method=GrayscaleMethod.LUMINANCE,
+        )
+
+        self.assertEqual(batch_res.total, 2)
+        self.assertEqual(batch_res.success_count, 1)
+        self.assertEqual(batch_res.failure_count, 1)
+        self.assertEqual(len(batch_res.items), 2)
+        self.assertIsInstance(batch_res.items[0], BatchItemResult)
+        self.assertTrue(batch_res.items[0].success)
+        self.assertIsNotNone(batch_res.items[0].metrics)
+        self.assertGreater(batch_res.items[0].metrics.psnr, 0.0)
+        self.assertFalse(batch_res.items[1].success)
+        self.assertGreater(batch_res.avg_psnr, 0.0)
+        self.assertEqual(batch_res.avg_savings_pct, 50.0)
+        self.assertIsNotNone(batch_res.items[0].source_thumb_bytes)
+        self.assertIsNotNone(batch_res.items[0].quantized_thumb_bytes)
+
+    def test_make_thumbnail_png(self) -> None:
+        from src.core.batch import make_thumbnail_png
+        arr_rgb = np.random.randint(0, 256, (500, 400, 3), dtype=np.uint8)
+        thumb = make_thumbnail_png(arr_rgb, max_size=100)
+        self.assertIsInstance(thumb, bytes)
+        self.assertGreater(len(thumb), 0)
+
+        # Verifica dimensões da miniatura gerada
+        import io
+        pil_thumb = Image.open(io.BytesIO(thumb))
+        self.assertLessEqual(max(pil_thumb.size), 100)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -119,6 +119,7 @@ def generate_comparison_figure(
     quantized: np.ndarray,
     bits: int,
     technique_name: str,
+    gray_method_name: str | None = None,
     hist_color: str = "#4a90d9",
     orig_hist_color: str = "#555555",
 ) -> bytes:
@@ -135,6 +136,7 @@ def generate_comparison_figure(
         quantized: Array NumPy (H, W) ou (H, W, 3) uint8.
         bits: Número de bits utilizado na quantização.
         technique_name: Nome da técnica para o título da figura.
+        gray_method_name: Nome do método de escala de cinza (opcional).
         hist_color: Cor hexadecimal da barra do histograma quantizado.
         orig_hist_color: Cor hexadecimal da barra do histograma original.
 
@@ -145,19 +147,20 @@ def generate_comparison_figure(
     hist_original = compute_histogram(original)
     hist_quantized = compute_histogram(quantized)
 
+    method_str = f" | {gray_method_name}" if gray_method_name else ""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(
-        f"Comparação de Quantização — {technique_name} ({bits} bits / {n_tons} tons)",
+        f"Comparação de Quantização — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
         fontsize=14,
         fontweight="bold",
     )
 
     # Linha 1 — Imagens
     _plot_image(axes[0, 0], original, "Original (8 bits / 256 tons)")
-    _plot_image(axes[0, 1], quantized, f"Quantizada ({bits} bits / {n_tons} tons)")
+    _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
 
     # Linha 2 — Histogramas
-    _plot_histogram(axes[1, 0], hist_original, "Histograma — Original", color=orig_hist_color)
+    _plot_histogram(axes[1, 0], hist_original, "Histograma — Original (8 bits)", color=orig_hist_color)
     _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color=hist_color)
 
     plt.tight_layout()
@@ -173,6 +176,7 @@ def generate_full_comparison_figure(
     uniform: np.ndarray,
     kmeans: np.ndarray,
     bits: int,
+    gray_method_name: str | None = None,
     hist_color_unif: str = "#4a90d9",
     hist_color_km: str = "#e8624a",
     orig_hist_color: str = "#555555",
@@ -186,9 +190,10 @@ def generate_full_comparison_figure(
     hist_unif = compute_histogram(uniform)
     hist_km = compute_histogram(kmeans)
 
+    method_str = f" | {gray_method_name}" if gray_method_name else ""
     fig, axes = plt.subplots(2, 3, figsize=(18, 8))
     fig.suptitle(
-        f"Comparação Completa — {bits} bits / {n_tons} tons",
+        f"Comparação Completa (Uniforme × K-Means){method_str} — {bits} bits / {n_tons} tons",
         fontsize=14,
         fontweight="bold",
     )
@@ -196,7 +201,7 @@ def generate_full_comparison_figure(
     # Linha 1 — Imagens
     _plot_image(axes[0, 0], original, "Original (8 bits / 256 tons)")
     _plot_image(axes[0, 1], uniform, f"Quantização Uniforme ({bits} bits)")
-    _plot_image(axes[0, 2], kmeans, f"Quantização K-Means ({bits} bits)")
+    _plot_image(axes[0, 2], kmeans, f"Quantização Não-Uniforme K-Means ({bits} bits)")
 
     # Linha 2 — Histogramas
     _plot_histogram(axes[1, 0], hist_orig, "Histograma — Original", color=orig_hist_color)
@@ -218,6 +223,7 @@ def generate_color_comparison_figure(
     bits: int,
     technique_name: str,
     gray_image: np.ndarray | None = None,
+    gray_method_name: str | None = None,
 ) -> bytes:
     """
     Gera uma figura comparativa destacando a imagem original colorida (RGB)
@@ -226,33 +232,24 @@ def generate_color_comparison_figure(
     Se `gray_image` for fornecida, exibe uma grade 2×3 (Colorida, Cinza, Quantizada
     e seus respectivos histogramas). Caso contrário, exibe uma grade 2×2
     (Colorida vs Quantizada).
-
-    Args:
-        color_image: Array NumPy (H, W, 3/4) uint8 com imagem original colorida.
-        quantized: Array NumPy (H, W) uint8 — imagem após quantização.
-        bits: Número de bits utilizado na quantização.
-        technique_name: Nome da técnica utilizada.
-        gray_image: Opcional, imagem em escala de cinza intermediária.
-
-    Returns:
-        Bytes da figura no formato PNG.
     """
     n_tons = 2 ** bits
     hist_quantized = compute_histogram(quantized)
+    method_str = f" | {gray_method_name}" if gray_method_name else ""
 
     if gray_image is not None:
         hist_gray = compute_histogram(gray_image)
         fig, axes = plt.subplots(2, 3, figsize=(18, 8))
         fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name} ({bits} bits / {n_tons} tons)",
+            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
             fontsize=14,
             fontweight="bold",
         )
 
         # Linha 1: Imagens
-        _plot_color_image(axes[0, 0], color_image, "Original Colorida (RGB)")
-        _plot_image(axes[0, 1], gray_image, "Escala de Cinza Original (8 bits)")
-        _plot_image(axes[0, 2], quantized, f"Quantizada ({bits} bits / {n_tons} tons)")
+        _plot_color_image(axes[0, 0], color_image, "1. Original Colorida (RGB)")
+        _plot_image(axes[0, 1], gray_image, f"2. Escala de Cinza ({gray_method_name or '8 bits'})")
+        _plot_image(axes[0, 2], quantized, f"3. Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
 
         # Linha 2: Histogramas
         _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
@@ -261,13 +258,13 @@ def generate_color_comparison_figure(
     else:
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name} ({bits} bits / {n_tons} tons)",
+            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
             fontsize=14,
             fontweight="bold",
         )
 
         _plot_color_image(axes[0, 0], color_image, "Original Colorida (RGB)")
-        _plot_image(axes[0, 1], quantized, f"Quantizada ({bits} bits / {n_tons} tons)")
+        _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
 
         _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
         _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")

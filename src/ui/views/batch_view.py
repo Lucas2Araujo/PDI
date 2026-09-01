@@ -1,41 +1,135 @@
 """
-batch_view.py — Aba de Processamento de Imagens em Lote.
+batch_view.py — Aba de Processamento de Imagens em Lote (Batch).
 
-Permite ao usuário:
-  - Selecionar uma pasta de entrada com múltiplas imagens.
-  - Selecionar uma pasta de saída para os resultados.
-  - Configurar a técnica de quantização e o nível de bits.
-  - Acompanhar o processamento em tempo real via barra de progresso e log.
-  - Visualizar um resumo ao final (processadas, falhas).
+Compatível com Desktop (nativo) e Web (browser).
+
+Recursos:
+  - Fila de Imagens com Feedback Imediato: exibe miniaturas leves, resoluções e status
+    das imagens de amostra ou arquivos selecionados antes do processamento.
+  - Configurações Didáticas: menu de métodos de conversão em escala de cinza,
+    técnicas de quantização (Uniforme, K-Means, Histograma) e resolução em bits.
+  - Telemetria e Progresso em Tempo Real: acompanhamento detalhado com barra de progresso,
+    tempo de execução e atualização de status por imagem.
+  - Galeria Interativa de Resultados: comparativo visual (Original × Quantizada)
+    com métricas individuais (MSE, PSNR, Economia), Visualizador de Zoom (10×),
+    modal das "🔬 Entranhas do Processo" para cada imagem e download individual/ZIP.
 """
 
+import io
 from pathlib import Path
+from typing import Any
+import zipfile
 
 import flet as ft
+import numpy as np
+from PIL import Image
 
-from src.core.batch import SUPPORTED_EXTENSIONS, BatchResult, discover_images, process_batch_async
-from src.core.grayscale import GrayscaleMethod
-from src.core.quantization import QuantizationTechnique
+from src.core.batch import (
+    SUPPORTED_EXTENSIONS,
+    BatchItemResult,
+    BatchResult,
+    discover_images,
+    make_thumbnail_png,
+    process_batch,
+    process_bytes_batch,
+    process_file_list,
+)
+from src.core.grayscale import (
+    GrayscaleMethod,
+    colorize_channel,
+    is_channel_isolation,
+    method_label,
+    to_grayscale,
+)
+from src.core.quantization import (
+    QuantizationTechnique,
+    technique_label,
+)
+from src.core.samples import ASSETS_DIR, SAMPLE_OPTIONS
 from src.ui import theme
+from src.ui.common import (
+    _GRAYSCALE_DETAILS,
+    _TECHNIQUE_OPTIONS,
+    _bytes_to_data_uri,
+    _ndarray_to_png_bytes,
+    _read_image_file,
+    _register_file_pickers,
+)
+from src.ui.dialogs import open_inspector_dialog, open_zoom_dialog
 
 
 # ---------------------------------------------------------------------------
-# Helpers de Compatibilidade
+# Estrutura do Item em Fila
 # ---------------------------------------------------------------------------
 
 
-def _register_file_pickers(page: ft.Page, *pickers: ft.FilePicker) -> None:
-    """Registra os FilePickers como serviços na página (Flet 0.86+)."""
-    if hasattr(page, "services") and hasattr(page.services, "register_service"):
-        for picker in pickers:
-            page.services.register_service(picker)
+class _BatchQueueItem:
+    """Estrutura auxiliar para representar um item carregado na fila."""
+
+    def __init__(
+        self,
+        name: str,
+        path: Path | None = None,
+        raw_bytes: bytes | None = None,
+        array: np.ndarray | None = None,
+    ) -> None:
+        self.name = name
+        self.path = path
+        self.raw_bytes = raw_bytes
+        self.array = array
+        self.dimensions = "—"
+        self.color_type = "—"
+        self.status = "⏳ Pronto"
+        self.status_color = theme.INFO
+        self.thumb_bytes: bytes | None = None
+        self.card_ref: ft.Container | None = None
+        self.status_badge_ref: ft.Text | None = None
+
+        self._inspect_item()
+
+    def _inspect_item() -> None:
+        pass
+
+    def _inspect_item(self) -> None:
+        try:
+            if self.array is None:
+                if self.raw_bytes is not None:
+                    with Image.open(io.BytesIO(self.raw_bytes)) as pil_img:
+                        if pil_img.mode in ("RGBA", "LA", "P"):
+                            pil_img = pil_img.convert("RGB")
+                        self.array = np.array(pil_img)
+                elif self.path is not None and self.path.exists():
+                    self.array = _read_image_file(self.path)
+
+            if self.array is not None:
+                h, w = self.array.shape[:2]
+                self.dimensions = f"{w}×{h} px"
+                is_color = bool(self.array.ndim == 3 and self.array.shape[2] >= 3)
+                self.color_type = "RGB (24 bpp)" if is_color else "Cinza (8 bpp)"
+                self.thumb_bytes = make_thumbnail_png(self.array, max_size=160)
+        except Exception:
+            self.dimensions = "Erro"
+            self.color_type = "Desconhecido"
+
+    def get_full_png_bytes(self) -> bytes | None:
+        """Gera os bytes PNG em resolução total sob demanda (ex.: para Zoom)."""
+        if self.array is not None:
+            return _ndarray_to_png_bytes(self.array)
+        if self.raw_bytes is not None:
+            return self.raw_bytes
+        if self.path is not None and self.path.exists():
+            return self.path.read_bytes()
+        return None
+
+
+# ---------------------------------------------------------------------------
+# View Principal
+# ---------------------------------------------------------------------------
 
 
 class BatchView(ft.Column):
     """
-    View de processamento em lote de um diretório inteiro de imagens.
-
-    Herda ft.Column para ser inserida diretamente como conteúdo de aba.
+    View de processamento em lote adaptativa para Desktop e Web.
     """
 
     def __init__(self, page: ft.Page) -> None:
@@ -45,9 +139,20 @@ class BatchView(ft.Column):
             expand=True,
         )
         self._page = page
+        self._is_web: bool = bool(getattr(page, "web", False))
+
+        # Estado da fila e seleção
         self._input_dir: Path | None = None
         self._output_dir: Path | None = None
-        self._is_processing = False
+        self._selected_images: list[Path] = []
+        self._web_file_data: list[tuple[str, bytes]] = []
+        self._queue_items: list[_BatchQueueItem] = []
+        self._batch_result: BatchResult | None = None
+
+        self._selected_technique: QuantizationTechnique | str = QuantizationTechnique.UNIFORM
+        self._selected_gray_method: GrayscaleMethod = GrayscaleMethod.LUMINANCE
+        self._bits_value: int = 4
+        self._is_processing: bool = False
 
         self._build_controls()
         self._assemble_layout()
@@ -57,15 +162,25 @@ class BatchView(ft.Column):
     # -----------------------------------------------------------------------
 
     def _build_controls(self) -> None:
-        """Inicializa todos os controles da view."""
-        # FilePickers registrados como serviços (Flet 0.86+)
+        """Inicializa todos os controles da view de processamento em lote."""
+        is_web = self._is_web
+
+        # FilePickers
         self._input_picker = ft.FilePicker()
         self._output_picker = ft.FilePicker()
-        _register_file_pickers(self._page, self._input_picker, self._output_picker)
+        self._files_picker = ft.FilePicker()
+        self._save_picker = ft.FilePicker()
+        _register_file_pickers(
+            self._page,
+            self._input_picker,
+            self._output_picker,
+            self._files_picker,
+            self._save_picker,
+        )
 
-        # Rótulos dos diretórios selecionados
+        # ── Rótulos informativos ──────────────────────────────────────────
         self._input_label = ft.Text(
-            "Nenhuma pasta selecionada",
+            "Nenhuma pasta ou imagens selecionadas",
             color=theme.TEXT_SECONDARY,
             size=theme.FONT_CAPTION,
             italic=True,
@@ -73,49 +188,180 @@ class BatchView(ft.Column):
             expand=True,
         )
         self._output_label = ft.Text(
-            "Nenhuma pasta selecionada",
+            "Download automático após processamento" if is_web else "Destino padrão: assets/lote_resultado",
             color=theme.TEXT_SECONDARY,
             size=theme.FONT_CAPTION,
             italic=True,
             overflow=ft.TextOverflow.ELLIPSIS,
             expand=True,
         )
-
-        # Contador de imagens encontradas
         self._image_count_text = ft.Text(
             "",
             color=theme.TEXT_SECONDARY,
             size=theme.FONT_CAPTION,
         )
 
-        # Dropdown: técnica de quantização
+        # ── Botões de Início (Disponíveis tanto no Card 1 quanto no Card 2) ──
+        self._btn_start_top = ft.Button(
+            content="🚀 Iniciar Processamento em Lote Agora",
+            icon=ft.Icons.PLAY_ARROW,
+            on_click=self._on_start,
+            disabled=True,
+            bgcolor=theme.SUCCESS,
+            color="#FFFFFF",
+            height=44,
+        )
+        self._btn_start = ft.Button(
+            content="🚀 Iniciar Processamento em Lote",
+            icon=ft.Icons.PLAY_ARROW,
+            on_click=self._on_start,
+            disabled=True,
+            bgcolor=theme.SUCCESS,
+            color="#FFFFFF",
+            height=44,
+        )
+
+        # ── Seção de Fila de Imagens com Feedback Imediato ────────────────
+        self._queue_grid = ft.Row(
+            controls=[],
+            wrap=True,
+            spacing=12,
+        )
+        self._queue_container = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.PHOTO_LIBRARY, size=20, color=theme.PRIMARY_LIGHT),
+                            ft.Text(
+                                "Fila de Imagens Carregadas (Preview Imediato)",
+                                weight=ft.FontWeight.BOLD,
+                                size=theme.FONT_SUBTITLE,
+                                color=ft.Colors.ON_SURFACE,
+                            ),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Divider(height=1),
+                    self._queue_grid,
+                    ft.Divider(height=1),
+                    ft.Row(
+                        controls=[self._btn_start_top],
+                        alignment=ft.MainAxisAlignment.END,
+                    ),
+                ],
+                spacing=10,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=10,
+            padding=12,
+            visible=False,
+        )
+
+        # ── Menu de Configurações ─────────────────────────────────────────
+        self._gray_category_selector = ft.SegmentedButton(
+            segments=[
+                ft.Segment(
+                    value="weighted",
+                    label=ft.Text("Ponderação / Média"),
+                    icon=ft.Icon(ft.Icons.AUTO_AWESOME),
+                ),
+                ft.Segment(
+                    value="channels",
+                    label=ft.Text("Isolamento de Canais (RGB)"),
+                    icon=ft.Icon(ft.Icons.PALETTE),
+                ),
+            ],
+            selected=["weighted"],
+            on_change=self._on_gray_category_changed,
+        )
+
+        self._gray_options_selector = ft.SegmentedButton(
+            segments=[
+                ft.Segment(
+                    value=str(GrayscaleMethod.LUMINANCE.value),
+                    label=ft.Text("Luminância ITU-R BT.601"),
+                    icon=ft.Icon(ft.Icons.VISIBILITY),
+                ),
+                ft.Segment(
+                    value=str(GrayscaleMethod.AVERAGE.value),
+                    label=ft.Text("Média Aritmética"),
+                    icon=ft.Icon(ft.Icons.CALCULATE),
+                ),
+            ],
+            selected=[str(GrayscaleMethod.LUMINANCE.value)],
+            on_change=self._on_gray_method_segmented_changed,
+        )
+
+        # Caixa didática de informações da conversão para cinza
+        details = _GRAYSCALE_DETAILS[GrayscaleMethod.LUMINANCE]
+        self._gray_info_title = ft.Text(
+            details["title"],
+            size=theme.FONT_BODY,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.ON_SURFACE,
+        )
+        self._gray_info_formula = ft.Text(
+            f"Fórmula: {details['formula']}",
+            size=theme.FONT_CAPTION,
+            weight=ft.FontWeight.BOLD,
+            color=theme.PRIMARY_LIGHT,
+        )
+        self._gray_info_desc = ft.Text(
+            details["desc"],
+            size=theme.FONT_CAPTION,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        self._gray_info_box = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.INFO_OUTLINE, size=18, color=theme.PRIMARY_LIGHT),
+                            self._gray_info_title,
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self._gray_info_formula,
+                    self._gray_info_desc,
+                ],
+                spacing=4,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=8,
+            padding=10,
+        )
+
+        # Dropdown: Técnica de Quantização
         self._technique_dropdown = ft.Dropdown(
             label="Técnica de Quantização",
             options=[
-                ft.dropdown.Option(key=str(QuantizationTechnique.UNIFORM.value), text="Quantização Uniforme"),
-                ft.dropdown.Option(key=str(QuantizationTechnique.KMEANS.value), text="Quantização Não-Uniforme (K-Means)"),
-                ft.dropdown.Option(key=str(QuantizationTechnique.HISTOGRAM.value), text="Quantização por Histograma (Frequência)"),
+                ft.dropdown.Option(
+                    key=str(t.value) if isinstance(t, QuantizationTechnique) else str(t),
+                    text=label,
+                )
+                for t, label in _TECHNIQUE_OPTIONS
+                if t != "BOTH"
             ],
             value=str(QuantizationTechnique.UNIFORM.value),
             color=ft.Colors.ON_SURFACE,
+            on_select=self._on_technique_changed,
         )
 
-        # Dropdown: método de conversão para cinza (organizado e descritivo)
+        # Compatibilidade com referências legadas
         self._gray_dropdown = ft.Dropdown(
-            label="Método de Conversão para Cinza",
+            label="Método de Conversão para Cinza (Legado)",
             options=[
-                ft.dropdown.Option(key=str(GrayscaleMethod.LUMINANCE.value), text="Luminância ITU-R BT.601 (Padrão: 0.299R + 0.587G + 0.114B)"),
-                ft.dropdown.Option(key=str(GrayscaleMethod.AVERAGE.value), text="Média Aritmética ((R+G+B)/3)"),
-                ft.dropdown.Option(key=str(GrayscaleMethod.CHANNEL_R.value), text="Isolamento de Canal: Vermelho (R)"),
-                ft.dropdown.Option(key=str(GrayscaleMethod.CHANNEL_G.value), text="Isolamento de Canal: Verde (G)"),
-                ft.dropdown.Option(key=str(GrayscaleMethod.CHANNEL_B.value), text="Isolamento de Canal: Azul (B)"),
+                ft.dropdown.Option(key=str(m.value), text=details["title"])
+                for m, details in _GRAYSCALE_DETAILS.items()
             ],
             value=str(GrayscaleMethod.LUMINANCE.value),
-            color=ft.Colors.ON_SURFACE,
+            visible=False,
         )
 
         # Slider de bits
-        self._bits_value = 4
         self._bits_label = ft.Text(
             f"{self._bits_value} bits  —  {2 ** self._bits_value} tons de cinza",
             size=theme.FONT_BODY,
@@ -130,10 +376,11 @@ class BatchView(ft.Column):
             label="{value} bits",
             active_color=theme.PRIMARY,
             thumb_color=theme.PRIMARY_LIGHT,
+            expand=True,
             on_change=self._on_bits_changed,
         )
 
-        # Barra de progresso e status
+        # ── Progresso ────────────────────────────────────────────────────
         self._progress_bar = ft.ProgressBar(
             value=0.0,
             color=theme.PRIMARY,
@@ -151,73 +398,141 @@ class BatchView(ft.Column):
             size=theme.FONT_BODY,
             weight=ft.FontWeight.BOLD,
         )
-
-        # Log de processamento
         self._log_list = ft.ListView(
-            height=200,
+            height=160,
             spacing=2,
             auto_scroll=True,
         )
 
-        # Resumo final
-        self._summary_card = ft.Container(visible=False)
-
-        # Botões de ação
-        self._btn_input = ft.Button(
-            content="Pasta de Entrada",
-            icon=ft.Icons.FOLDER_OPEN,
-            on_click=self._on_select_input_dir,
+        # ── Botões de Ação ───────────────────────────────────────────────
+        self._btn_sample_batch = ft.Button(
+            content="⚡ Carregar 5 Amostras do App",
+            icon=ft.Icons.AUTO_AWESOME,
+            on_click=self._on_select_sample_batch,
             bgcolor=theme.PRIMARY,
             color="#FFFFFF",
         )
+        self._btn_select_files = ft.OutlinedButton(
+            content="Selecionar Arquivos",
+            icon=ft.Icons.PERM_MEDIA,
+            on_click=self._on_select_files,
+        )
+        self._btn_input = ft.OutlinedButton(
+            content="Pasta de Entrada",
+            icon=ft.Icons.FOLDER_OPEN,
+            on_click=self._on_select_input_dir,
+            visible=not is_web,
+        )
         self._btn_output = ft.Button(
-            content="Pasta de Saída",
+            content="Mudar Pasta de Saída",
             icon=ft.Icons.DRIVE_FILE_MOVE,
             on_click=self._on_select_output_dir,
             bgcolor=theme.PRIMARY_DARK,
             color="#FFFFFF",
+            visible=not is_web,
         )
-        self._btn_start = ft.Button(
-            content="Iniciar Processamento",
-            icon=ft.Icons.PLAY_CIRCLE,
-            on_click=self._on_start,
-            disabled=True,
-            bgcolor=theme.SUCCESS,
-            color="#FFFFFF",
+
+        # ── Cards de Resultados ──────────────────────────────────────────
+        self._summary_card = ft.Container(visible=False)
+        self._download_section = ft.Container(visible=False)
+        self._results_gallery = ft.Column(controls=[], spacing=14)
+        self._results_gallery_container = ft.Container(
+            content=ft.Column(
+                controls=[
+                    theme.section_title("🖼️  Galeria Interativa de Resultados do Lote"),
+                    ft.Divider(height=1),
+                    ft.Text(
+                        "Para cada imagem processada, você pode abrir o pop-up com Zoom Interativo (10×) ou "
+                        "inspecionar as Entranhas do Processamento (Amostra 5×5, Aritmética, Tabela de Quantização e Heatmap de Erro).",
+                        size=theme.FONT_CAPTION,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    self._results_gallery,
+                ],
+                spacing=10,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            border_radius=theme.BORDER_RADIUS,
+            padding=theme.PADDING_CARD,
+            visible=False,
+        )
+
+        # Banner web
+        self._web_banner = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.INFO_OUTLINE, color=theme.PRIMARY_LIGHT, size=18),
+                    ft.Text(
+                        "Modo Web: selecione as imagens pelo botão abaixo. "
+                        "Os resultados poderão ser visualizados interativamente e baixados individualmente ou em ZIP.",
+                        size=theme.FONT_CAPTION,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=8,
+            padding=10,
+            visible=is_web,
         )
 
     def _assemble_layout(self) -> None:
-        """Monta o layout completo da aba de lote."""
+        """Monta o layout da view."""
+        is_web = self._is_web
+
+        input_buttons: list[ft.Control] = [self._btn_sample_batch, self._btn_select_files]
+        if not is_web:
+            input_buttons.append(self._btn_input)
+
+        output_row = ft.Row(
+            controls=[self._btn_output, self._output_label],
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=not is_web,
+        )
+
+        input_info_row = ft.Row(
+            controls=[
+                ft.Text("Entrada:", weight=ft.FontWeight.BOLD, size=theme.FONT_CAPTION),
+                self._input_label,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
         self.controls = [
-            # Card 1: Seleção de pastas
+            # Card 1: Seleção de Imagens e Diretórios
             theme.card(
                 ft.Column(
                     controls=[
-                        theme.section_title("📁  Seleção de Diretórios"),
+                        theme.section_title("📁  Seleção de Imagens e Fila do Lote"),
                         ft.Divider(height=1),
-                        ft.Row(
-                            controls=[self._btn_input, self._input_label],
-                            spacing=12,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Row(
-                            controls=[self._btn_output, self._output_label],
-                            spacing=12,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
+                        self._web_banner,
+                        ft.Row(controls=input_buttons, spacing=10, wrap=True),
+                        input_info_row,
+                        output_row,
                         self._image_count_text,
+                        self._queue_container,
                     ],
                     spacing=12,
                 )
             ),
-            # Card 2: Configurações
+            # Card 2: Configurações do Processamento em Lote
             theme.card(
                 ft.Column(
                     controls=[
-                        theme.section_title("⚙️  Configurações"),
+                        theme.section_title("⚙️  Configurações de Quantização do Lote"),
                         ft.Divider(height=1),
+                        ft.Text("1. Método de Conversão para Escala de Cinza / Canais:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
+                        self._gray_category_selector,
+                        self._gray_options_selector,
+                        self._gray_info_box,
+                        ft.Divider(height=1),
+                        ft.Text("2. Técnica e Resolução em Bits:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
                         self._technique_dropdown,
-                        self._gray_dropdown,
                         ft.Column(
                             controls=[
                                 ft.Row(
@@ -244,11 +559,11 @@ class BatchView(ft.Column):
                     spacing=12,
                 )
             ),
-            # Card 3: Progresso
+            # Card 3: Progresso e Log de Execução
             theme.card(
                 ft.Column(
                     controls=[
-                        theme.section_title("⏳  Progresso"),
+                        theme.section_title("⏳  Progresso do Processamento"),
                         ft.Divider(height=1),
                         ft.Row(
                             controls=[self._progress_text, self._progress_percent],
@@ -260,210 +575,848 @@ class BatchView(ft.Column):
                             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
                             border_radius=8,
                             padding=8,
-                            height=200,
+                            height=160,
                         ),
                     ],
                     spacing=10,
                 )
             ),
-            # Card 4: Resumo (visível apenas ao concluir)
+            # Card 4: Resumo Geral e Ações Globais
             self._summary_card,
+            # Card 5: Galeria de Resultados Detalhada
+            self._results_gallery_container,
+            # Card 6: Seção de downloads web legado
+            self._download_section,
         ]
 
     # -----------------------------------------------------------------------
-    # Handlers de Eventos
+    # Feedback e Notificações
     # -----------------------------------------------------------------------
 
+    def _show_message(self, message: str, color: str = theme.SUCCESS) -> None:
+        """Exibe uma notificação ou SnackBar na tela."""
+        snack = ft.SnackBar(ft.Text(message), bgcolor=color)
+        if hasattr(self._page, "show_dialog"):
+            self._page.show_dialog(snack)
+        elif hasattr(self._page, "show_snack_bar"):
+            self._page.show_snack_bar(snack)
+        self._page.update()
+
+    # -----------------------------------------------------------------------
+    # Gerenciamento da Fila de Imagens
+    # -----------------------------------------------------------------------
+
+    def _render_queue_preview(self) -> None:
+        """Atualiza a grade visual de miniaturas dos itens carregados na fila."""
+        self._queue_grid.controls.clear()
+
+        if not self._queue_items:
+            self._queue_container.visible = False
+            self._page.update()
+            return
+
+        for item in self._queue_items:
+            img_ctrl = ft.Image(
+                src=_bytes_to_data_uri(item.thumb_bytes) if item.thumb_bytes else "",
+                width=80,
+                height=80,
+                fit=getattr(ft.BoxFit, "COVER", None) if hasattr(ft, "BoxFit") else None,
+                border_radius=6,
+            )
+
+            status_text = ft.Text(
+                item.status,
+                size=11,
+                weight=ft.FontWeight.BOLD,
+                color=item.status_color,
+            )
+            item.status_badge_ref = status_text
+
+            btn_zoom = ft.IconButton(
+                icon=ft.Icons.ZOOM_IN,
+                icon_size=18,
+                tooltip=f"Ampliar original: {item.name}",
+                on_click=lambda _, it=item: open_zoom_dialog(
+                    self._page, f"Imagem de Entrada — {it.name}", it.get_full_png_bytes()
+                ),
+            )
+
+            item_card = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Container(
+                            content=img_ctrl,
+                            on_click=lambda _, it=item: open_zoom_dialog(
+                                self._page, f"Imagem de Entrada — {it.name}", it.get_full_png_bytes()
+                            ),
+                            tooltip="Clique para ampliar original",
+                            ink=True,
+                            border_radius=6,
+                        ),
+                        ft.Column(
+                            controls=[
+                                ft.Text(
+                                    item.name,
+                                    weight=ft.FontWeight.BOLD,
+                                    size=12,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    width=130,
+                                ),
+                                ft.Text(f"{item.dimensions} • {item.color_type}", size=11, color=theme.TEXT_SECONDARY),
+                                ft.Row(controls=[status_text, btn_zoom], spacing=2, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                            ],
+                            spacing=2,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=ft.Colors.SURFACE_CONTAINER,
+                border_radius=8,
+                padding=8,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft, "Border") else None,
+                width=260,
+            )
+            item.card_ref = item_card
+            self._queue_grid.controls.append(item_card)
+
+        self._queue_container.visible = True
+        self._update_start_button_state()
+        self._page.update()
+
+    # -----------------------------------------------------------------------
+    # Handlers de Seleção
+    # -----------------------------------------------------------------------
+
+    def _on_select_sample_batch(self, _: ft.ControlEvent) -> None:
+        """Carrega as 5 imagens de amostra embutidas no app."""
+        sample_paths = [
+            ASSETS_DIR / s["name"]
+            for s in SAMPLE_OPTIONS
+            if (ASSETS_DIR / s["name"]).exists()
+        ]
+        if not sample_paths:
+            self._image_count_text.value = "⚠️  Nenhuma imagem de amostra encontrada na pasta assets."
+            self._image_count_text.color = theme.WARNING
+            self._show_message("Nenhuma imagem de amostra encontrada na pasta assets.", theme.WARNING)
+            self._page.update()
+            return
+
+        self._selected_images = sample_paths
+        self._web_file_data = []
+        self._input_dir = None
+
+        self._queue_items = [
+            _BatchQueueItem(name=p.name, path=p)
+            for p in sample_paths
+        ]
+
+        self._input_label.value = (
+            f"Amostras do App ({len(sample_paths)} imagens: Retrato, Benchmark, Lena, Ayla, Pentágono)"
+        )
+        self._input_label.italic = False
+        self._input_label.color = theme.TEXT_PRIMARY
+
+        if not self._is_web and not self._output_dir:
+            self._output_dir = ASSETS_DIR / "lote_resultado"
+            self._output_label.value = str(self._output_dir)
+            self._output_label.italic = False
+            self._output_label.color = theme.TEXT_PRIMARY
+
+        self._image_count_text.value = f"✅  {len(sample_paths)} imagens carregadas e prontas para quantização."
+        self._image_count_text.color = theme.SUCCESS
+
+        self._render_queue_preview()
+        self._show_message(f"✅ {len(sample_paths)} imagens carregadas na fila! Clique no botão verde 'Iniciar' para quantizar.")
+
     async def _on_select_input_dir(self, _: ft.ControlEvent) -> None:
-        """Abre o seletor para o diretório de entrada."""
-        path_str = await self._input_picker.get_directory_path(dialog_title="Selecionar Pasta de Entrada")
+        """Desktop: abre diálogo para selecionar pasta inteira."""
+        try:
+            path_str = await self._input_picker.get_directory_path(
+                dialog_title="Selecionar Pasta de Entrada"
+            )
+        except Exception as exc:
+            self._image_count_text.value = f"⚠️  Erro ao abrir seletor: {exc}"
+            self._image_count_text.color = theme.WARNING
+            self._show_message(f"Erro ao abrir seletor: {exc}", theme.ACCENT)
+            self._page.update()
+            return
+
         if not path_str:
             return
+
         self._input_dir = Path(path_str)
+        self._selected_images = []
+        self._web_file_data = []
         self._input_label.value = str(self._input_dir)
         self._input_label.italic = False
         self._input_label.color = theme.TEXT_PRIMARY
 
+        if not self._output_dir:
+            self._output_dir = self._input_dir / "lote_resultado"
+            self._output_label.value = str(self._output_dir)
+            self._output_label.italic = False
+            self._output_label.color = theme.TEXT_PRIMARY
+
         try:
             images = discover_images(self._input_dir)
-            exts = ", ".join(sorted(SUPPORTED_EXTENSIONS))
-            self._image_count_text.value = (
-                f"✅  {len(images)} imagem(ns) encontrada(s) — formatos suportados: {exts}"
-            )
+            self._selected_images = images
+            self._queue_items = [
+                _BatchQueueItem(name=p.name, path=p) for p in images
+            ]
+            self._image_count_text.value = f"✅  {len(images)} imagem(ns) encontrada(s) na pasta."
             self._image_count_text.color = theme.SUCCESS
+            self._render_queue_preview()
+            self._show_message(f"✅ {len(images)} imagem(ns) adicionada(s) à fila!")
         except ValueError:
             self._image_count_text.value = "⚠️  Nenhuma imagem suportada encontrada nesta pasta."
             self._image_count_text.color = theme.WARNING
+            self._queue_items = []
+            self._render_queue_preview()
+            self._show_message("Nenhuma imagem suportada encontrada nesta pasta.", theme.WARNING)
 
-        self._update_start_button_state()
-        self._page.update()
+    async def _on_select_files(self, _: ft.ControlEvent) -> None:
+        """Seleciona múltiplos arquivos de imagem individualmente."""
+        try:
+            exts = [ext.lstrip(".") for ext in sorted(SUPPORTED_EXTENSIONS)]
+            files = await self._files_picker.pick_files(
+                dialog_title="Selecionar Imagens",
+                allow_multiple=True,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=exts,
+                with_data=True,
+            )
+        except Exception as exc:
+            self._image_count_text.value = f"⚠️  Erro ao selecionar arquivos: {exc}"
+            self._image_count_text.color = theme.WARNING
+            self._show_message(f"Erro ao selecionar arquivos: {exc}", theme.ACCENT)
+            self._page.update()
+            return
+
+        if not files:
+            return
+
+        self._input_dir = None
+        self._queue_items = []
+
+        if self._is_web:
+            self._web_file_data = [(f.name, f.bytes) for f in files if f.bytes is not None]
+            self._selected_images = []
+            for name, raw in self._web_file_data:
+                self._queue_items.append(_BatchQueueItem(name=name, raw_bytes=raw))
+            count = len(self._web_file_data)
+        else:
+            self._selected_images = [Path(f.path) for f in files if f.path]
+            self._web_file_data = []
+            for f in files:
+                p = Path(f.path) if f.path else None
+                self._queue_items.append(
+                    _BatchQueueItem(name=f.name, path=p, raw_bytes=f.bytes)
+                )
+            count = len(self._selected_images)
+
+            if self._selected_images and not self._output_dir:
+                self._output_dir = self._selected_images[0].parent / "lote_resultado"
+                self._output_label.value = str(self._output_dir)
+                self._output_label.italic = False
+                self._output_label.color = theme.TEXT_PRIMARY
+
+        names_preview = ", ".join(f.name for f in files[:3])
+        if len(files) > 3:
+            names_preview += f" e mais {len(files) - 3}..."
+        self._input_label.value = f"{count} arquivo(s): {names_preview}"
+        self._input_label.italic = False
+        self._input_label.color = theme.TEXT_PRIMARY
+        self._image_count_text.value = f"✅  {count} arquivo(s) selecionado(s)."
+        self._image_count_text.color = theme.SUCCESS
+
+        self._render_queue_preview()
+        self._show_message(f"✅ {count} imagem(ns) adicionada(s) à fila!")
 
     async def _on_select_output_dir(self, _: ft.ControlEvent) -> None:
-        """Abre o seletor para o diretório de saída."""
-        path_str = await self._output_picker.get_directory_path(dialog_title="Selecionar Pasta de Saída")
+        """Desktop: seleciona pasta de destino dos arquivos quantizados."""
+        try:
+            path_str = await self._output_picker.get_directory_path(
+                dialog_title="Selecionar Pasta de Saída"
+            )
+        except Exception as exc:
+            self._output_label.value = f"⚠️  Erro ao abrir seletor: {exc}"
+            self._output_label.color = theme.WARNING
+            self._show_message(f"Erro ao abrir seletor: {exc}", theme.ACCENT)
+            self._page.update()
+            return
+
         if not path_str:
             return
+
         self._output_dir = Path(path_str)
         self._output_label.value = str(self._output_dir)
         self._output_label.italic = False
         self._output_label.color = theme.TEXT_PRIMARY
         self._update_start_button_state()
+        self._show_message("Pasta de saída configurada.")
         self._page.update()
+
+    # -----------------------------------------------------------------------
+    # Handlers de Configuração
+    # -----------------------------------------------------------------------
+
+    def _on_gray_category_changed(self, event: ft.ControlEvent) -> None:
+        if not event.control.selected:
+            return
+        cat = next(iter(event.control.selected), "weighted")
+        if cat == "weighted":
+            self._gray_options_selector.segments = [
+                ft.Segment(
+                    value=str(GrayscaleMethod.LUMINANCE.value),
+                    label=ft.Text("Luminância ITU-R BT.601"),
+                    icon=ft.Icon(ft.Icons.VISIBILITY),
+                ),
+                ft.Segment(
+                    value=str(GrayscaleMethod.AVERAGE.value),
+                    label=ft.Text("Média Aritmética"),
+                    icon=ft.Icon(ft.Icons.CALCULATE),
+                ),
+            ]
+            self._selected_gray_method = GrayscaleMethod.LUMINANCE
+        else:
+            self._gray_options_selector.segments = [
+                ft.Segment(
+                    value=str(GrayscaleMethod.CHANNEL_R.value),
+                    label=ft.Text("Canal R (Vermelho)"),
+                    icon=ft.Icon(ft.Icons.LOOKS_ONE),
+                ),
+                ft.Segment(
+                    value=str(GrayscaleMethod.CHANNEL_G.value),
+                    label=ft.Text("Canal G (Verde)"),
+                    icon=ft.Icon(ft.Icons.LOOKS_TWO),
+                ),
+                ft.Segment(
+                    value=str(GrayscaleMethod.CHANNEL_B.value),
+                    label=ft.Text("Canal B (Azul)"),
+                    icon=ft.Icon(ft.Icons.LOOKS_3),
+                ),
+            ]
+            self._selected_gray_method = GrayscaleMethod.CHANNEL_R
+
+        self._gray_options_selector.selected = [str(self._selected_gray_method.value)]
+        self._update_gray_info_box()
+        self._page.update()
+
+    def _on_gray_method_segmented_changed(self, event: ft.ControlEvent) -> None:
+        if not event.control.selected:
+            return
+        method_val = int(next(iter(event.control.selected)))
+        for method in GrayscaleMethod:
+            if method.value == method_val:
+                self._selected_gray_method = method
+                break
+        self._update_gray_info_box()
+        self._page.update()
+
+    def _update_gray_info_box(self) -> None:
+        details = _GRAYSCALE_DETAILS[self._selected_gray_method]
+        self._gray_info_title.value = details["title"]
+        self._gray_info_formula.value = f"Fórmula: {details['formula']}"
+        self._gray_info_desc.value = details["desc"]
+
+    def _on_technique_changed(self, event: ft.ControlEvent) -> None:
+        val = event.control.value
+        try:
+            int_val = int(val)
+            for t in QuantizationTechnique:
+                if t.value == int_val:
+                    self._selected_technique = t
+                    return
+        except ValueError:
+            self._selected_technique = val
 
     def _on_bits_changed(self, event: ft.ControlEvent) -> None:
-        """Atualiza o rótulo de bits ao mover o slider."""
         self._bits_value = int(event.control.value)
-        self._bits_label.value = f"{self._bits_value} bits  —  {2 ** self._bits_value} tons de cinza"
+        self._bits_label.value = (
+            f"{self._bits_value} bits  —  {2 ** self._bits_value} tons de cinza"
+        )
         self._page.update()
 
+    # -----------------------------------------------------------------------
+    # Lógica de Execução do Lote
+    # -----------------------------------------------------------------------
+
     def _on_start(self, _: ft.ControlEvent) -> None:
-        """Inicia o processamento em lote em thread sincronizada com o Flet."""
-        if self._is_processing or not self._input_dir or not self._output_dir:
+        """Inicia o processamento em background."""
+        if self._is_processing:
             return
 
-        technique = self._get_selected_technique()
-        gray_method = self._get_selected_gray_method()
+        if not self._queue_items and not self._selected_images and not self._web_file_data and not self._input_dir:
+            self._show_message("Adicione ao menos uma imagem à fila antes de iniciar.", theme.WARNING)
+            return
+
+        if not self._is_web and not self._output_dir:
+            self._output_dir = ASSETS_DIR / "lote_resultado"
+            self._output_label.value = str(self._output_dir)
+            self._output_label.italic = False
+            self._output_label.color = theme.TEXT_PRIMARY
 
         self._is_processing = True
         self._btn_start.disabled = True
+        self._btn_start_top.disabled = True
         self._btn_input.disabled = True
+        self._btn_select_files.disabled = True
+        self._btn_sample_batch.disabled = True
         self._btn_output.disabled = True
+
         self._log_list.controls.clear()
         self._summary_card.visible = False
-        self._progress_bar.value = 0.0
+        self._results_gallery_container.visible = False
+        self._results_gallery.controls.clear()
+        self._progress_bar.value = None
         self._progress_percent.value = "0%"
-        self._progress_text.value = "Iniciando..."
+        self._progress_text.value = "🚀 Iniciando processamento do lote..."
+
+        for q_item in self._queue_items:
+            q_item.status = "⏳ Aguardando..."
+            q_item.status_color = theme.WARNING
+            if q_item.status_badge_ref:
+                q_item.status_badge_ref.value = q_item.status
+                q_item.status_badge_ref.color = q_item.status_color
+
+        self._show_message("🚀 Iniciando quantização em lote...", theme.INFO)
         self._page.update()
 
-        if hasattr(self._page, "run_thread"):
-            self._page.run_thread(
-                self._run_batch_worker,
-                self._input_dir,
-                self._output_dir,
-                technique,
-                self._bits_value,
-                gray_method,
-            )
-        else:
-            process_batch_async(
-                input_dir=self._input_dir,
-                output_dir=self._output_dir,
-                technique=technique,
-                bits=self._bits_value,
-                grayscale_method=gray_method,
-                progress_callback=self._on_progress,
-                done_callback=self._on_batch_done,
-            )
+        technique = self._get_selected_technique()
+        gray_method = self._selected_gray_method
+        bits = self._bits_value
 
-    def _run_batch_worker(
+        if self._is_web or self._web_file_data:
+            if hasattr(self._page, "run_thread"):
+                self._page.run_thread(self._run_worker_memory, technique, bits, gray_method)
+            else:
+                import threading
+                threading.Thread(
+                    target=self._run_worker_memory,
+                    args=(technique, bits, gray_method),
+                    daemon=True,
+                ).start()
+        else:
+            if hasattr(self._page, "run_thread"):
+                self._page.run_thread(self._run_worker_filesystem, technique, bits, gray_method)
+            else:
+                import threading
+                threading.Thread(
+                    target=self._run_worker_filesystem,
+                    args=(technique, bits, gray_method),
+                    daemon=True,
+                ).start()
+
+    def _run_worker_memory(
         self,
-        input_dir: Path,
-        output_dir: Path,
         technique: QuantizationTechnique,
         bits: int,
         grayscale_method: GrayscaleMethod,
     ) -> None:
-        """Executa o processamento do lote dentro da thread gerenciada pelo Flet."""
-        from src.core.batch import process_batch
+        """Worker em memória (web ou imagens carregadas com bytes)."""
         try:
-            result = process_batch(
-                input_dir=input_dir,
-                output_dir=output_dir,
+            if self._web_file_data:
+                images_data = self._web_file_data
+            elif self._queue_items:
+                images_data = []
+                for it in self._queue_items:
+                    if it.raw_bytes:
+                        images_data.append((it.name, it.raw_bytes))
+                    elif it.path:
+                        images_data.append((it.name, it.path.read_bytes()))
+                    elif it.array is not None:
+                        images_data.append((it.name, _ndarray_to_png_bytes(it.array)))
+            else:
+                raise ValueError("Nenhuma imagem disponível.")
+
+            result = process_bytes_batch(
+                images=images_data,
                 technique=technique,
                 bits=bits,
                 grayscale_method=grayscale_method,
                 progress_callback=self._on_progress,
+                item_callback=self._on_item_finished,
             )
-            self._on_batch_done(result)
-        except Exception as error:
-            self._progress_text.value = f"Erro: {error}"
-            self._is_processing = False
-            self._btn_start.disabled = False
-            self._btn_input.disabled = False
-            self._btn_output.disabled = False
+            self._batch_result = result
+            self._on_batch_complete(result)
+        except Exception as exc:
+            self._progress_text.value = f"Erro no lote: {exc}"
+            self._show_message(f"Erro no processamento: {exc}", theme.ACCENT)
+            self._reset_controls()
+            self._page.update()
+
+    def _run_worker_filesystem(
+        self,
+        technique: QuantizationTechnique,
+        bits: int,
+        grayscale_method: GrayscaleMethod,
+    ) -> None:
+        """Worker no disco (desktop)."""
+        try:
+            images = self._selected_images
+            if not images and self._input_dir:
+                images = discover_images(self._input_dir)
+
+            if not images and self._queue_items:
+                images = [it.path for it in self._queue_items if it.path is not None]
+
+            if not images:
+                self._run_worker_memory(technique, bits, grayscale_method)
+                return
+
+            out_dir = self._output_dir or (ASSETS_DIR / "lote_resultado")
+            result = process_file_list(
+                images=images,
+                output_dir=out_dir,
+                technique=technique,
+                bits=bits,
+                grayscale_method=grayscale_method,
+                progress_callback=self._on_progress,
+                item_callback=self._on_item_finished,
+            )
+            self._batch_result = result
+            self._on_batch_complete(result)
+        except Exception as exc:
+            self._progress_text.value = f"Erro no lote: {exc}"
+            self._show_message(f"Erro no processamento: {exc}", theme.ACCENT)
+            self._reset_controls()
             self._page.update()
 
     # -----------------------------------------------------------------------
-    # Callbacks de Processamento
+    # Callbacks de Progresso e Galeria de Resultados
     # -----------------------------------------------------------------------
 
     def _on_progress(self, processed: int, total: int, filename: str) -> None:
-        """Atualiza a UI de progresso ao concluir cada imagem."""
+        """Atualiza a barra de progresso e texto em tempo real."""
         ratio = processed / total if total > 0 else 0.0
         self._progress_bar.value = ratio
         self._progress_percent.value = f"{int(ratio * 100)}%"
-        self._progress_text.value = f"[{processed}/{total}]  {filename}"
-
-        status_icon = "✅"
-        log_entry = ft.Text(
-            f"{status_icon}  {filename}",
-            color=theme.TEXT_SECONDARY,
-            size=theme.FONT_CAPTION,
-        )
-        self._log_list.controls.append(log_entry)
+        self._progress_text.value = f"[{processed}/{total}]  Processando {filename}..."
         self._page.update()
 
-    def _on_batch_done(self, result: BatchResult) -> None:
-        """Exibe o resumo final ao concluir o processamento em lote."""
-        self._is_processing = False
-        self._btn_start.disabled = False
-        self._btn_input.disabled = False
-        self._btn_output.disabled = False
+    def _on_item_finished(self, item_result: BatchItemResult) -> None:
+        """Chamado no término individual de cada item para atualizar fila e log."""
+        for q_item in self._queue_items:
+            if q_item.name == item_result.filename:
+                if item_result.success:
+                    psnr_txt = f"{item_result.metrics.psnr:.1f} dB" if item_result.metrics else ""
+                    q_item.status = f"✅ Concluído ({item_result.elapsed_seconds:.2f}s • {psnr_txt})"
+                    q_item.status_color = theme.SUCCESS
+                else:
+                    q_item.status = "❌ Falha"
+                    q_item.status_color = theme.ACCENT
 
-        for failed_path, error_msg in result.failed:
-            log_entry = ft.Text(
-                f"❌  {failed_path.name}: {error_msg}",
-                color=theme.ACCENT,
-                size=theme.FONT_CAPTION,
-            )
-            self._log_list.controls.append(log_entry)
+                if q_item.status_badge_ref:
+                    q_item.status_badge_ref.value = q_item.status
+                    q_item.status_badge_ref.color = q_item.status_color
+                break
 
-        self._summary_card = theme.card(
-            ft.Column(
-                controls=[
-                    theme.section_title("✅  Processamento Concluído"),
-                    ft.Divider(height=1),
-                    ft.Row(
-                        controls=[
-                            theme.metric_badge("Total", str(result.total)),
-                            theme.metric_badge("Sucesso", str(result.success_count), color=theme.SUCCESS),
-                            theme.metric_badge("Falhas", str(result.failure_count), color=theme.ACCENT),
-                        ],
-                        spacing=12,
-                    ),
-                    ft.Text(
-                        f"Resultados salvos em: {result.output_dir}",
-                        color=ft.Colors.ON_SURFACE_VARIANT,
-                        size=theme.FONT_CAPTION,
-                    ),
-                ],
-                spacing=10,
+        if item_result.success:
+            self._log_list.controls.append(
+                ft.Text(
+                    f"✅ {item_result.filename} — {item_result.elapsed_seconds:.2f}s (PSNR: {item_result.metrics.psnr:.2f} dB)",
+                    color=theme.SUCCESS,
+                    size=theme.FONT_CAPTION,
+                )
             )
+        else:
+            self._log_list.controls.append(
+                ft.Text(
+                    f"❌ {item_result.filename} — Erro: {item_result.error}",
+                    color=theme.ACCENT,
+                    size=theme.FONT_CAPTION,
+                )
+            )
+        self._page.update()
+
+    def _on_batch_complete(self, result: BatchResult) -> None:
+        """Monta o resumo estatístico e a galeria de resultados interativa."""
+        self._reset_controls()
+        self._progress_bar.value = 1.0
+        self._progress_percent.value = "100%"
+        self._progress_text.value = f"🎉 Processamento concluído em {result.total_elapsed_seconds:.2f}s!"
+
+        # 1. Monta Card de Resumo Geral
+        summary_col = ft.Column(
+            controls=[
+                theme.section_title("📊  Resumo Geral do Processamento em Lote"),
+                ft.Divider(height=1),
+                ft.Row(
+                    controls=[
+                        theme.metric_badge("Total", str(result.total)),
+                        theme.metric_badge("Sucesso", str(result.success_count), color=theme.SUCCESS),
+                        theme.metric_badge("Falhas", str(result.failure_count), color=theme.ACCENT if result.failure_count > 0 else theme.SUCCESS),
+                        theme.metric_badge("Tempo Total", f"{result.total_elapsed_seconds:.2f}s", color=theme.WARNING),
+                        theme.metric_badge("PSNR Médio", f"{result.avg_psnr:.2f} dB", color=theme.SUCCESS),
+                        theme.metric_badge("MSE Médio", f"{result.avg_mse:.2f}"),
+                        theme.metric_badge("Economia", f"{result.avg_savings_pct:.1f}%", color=theme.WARNING),
+                    ],
+                    spacing=10,
+                    wrap=True,
+                ),
+                ft.Divider(height=1),
+                ft.Row(
+                    controls=[
+                        ft.Button(
+                            content="📦 Baixar Todos os Resultados (ZIP)",
+                            icon=ft.Icons.FOLDER_ZIP,
+                            on_click=self._on_download_zip_clicked,
+                            bgcolor=theme.PRIMARY,
+                            color="#FFFFFF",
+                        ),
+                        (
+                            ft.Text(
+                                f"📁 Arquivos salvos em: {result.output_dir}",
+                                size=theme.FONT_CAPTION,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            )
+                            if result.output_dir and not self._is_web
+                            else ft.Container()
+                        ),
+                    ],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    wrap=True,
+                ),
+            ],
+            spacing=10,
         )
+        self._summary_card.content = theme.card(summary_col)
         self._summary_card.visible = True
-        self.controls[-1] = self._summary_card
+
+        # 2. Monta a Galeria de Resultados Detalhada
+        self._results_gallery.controls.clear()
+
+        for item in result.items:
+            if not item.success:
+                continue
+
+            src_thumb = item.source_thumb_bytes or make_thumbnail_png(item.raw_array, 160)
+            quant_thumb = item.quantized_thumb_bytes or make_thumbnail_png(item.quantized_array, 160)
+
+            orig_img = ft.Image(
+                src=_bytes_to_data_uri(src_thumb) if src_thumb else "",
+                width=110,
+                height=110,
+                fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
+                border_radius=8,
+            )
+            quant_img = ft.Image(
+                src=_bytes_to_data_uri(quant_thumb) if quant_thumb else "",
+                width=110,
+                height=110,
+                fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
+                border_radius=8,
+            )
+
+            btn_zoom = ft.Button(
+                content="🔍 Zoom",
+                icon=ft.Icons.ZOOM_IN,
+                on_click=lambda _, it=item: open_zoom_dialog(
+                    self._page, f"Resultado Quantizado — {it.filename}", it.quantized_bytes
+                ),
+                bgcolor=theme.PRIMARY_LIGHT,
+                color="#FFFFFF",
+            )
+
+            btn_inspect = ft.Button(
+                content="🔬 Entranhas do Processo",
+                icon=ft.Icons.ANALYTICS,
+                on_click=lambda _, it=item: open_inspector_dialog(
+                    page=self._page,
+                    raw_image=it.raw_array,
+                    gray_image=it.gray_array,
+                    quantized_image=it.quantized_array,
+                    bits=self._bits_value,
+                    technique=self._get_selected_technique(),
+                    method=self._selected_gray_method,
+                ),
+                bgcolor=theme.ACCENT,
+                color="#FFFFFF",
+            )
+
+            async def _save_single_item(_: ft.ControlEvent, it=item) -> None:
+                if it.quantized_bytes:
+                    try:
+                        save_path = await self._save_picker.save_file(
+                            dialog_title=f"Salvar Imagem Quantizada — {it.filename}",
+                            file_name=f"quantizado_{it.filename}",
+                            allowed_extensions=["png"],
+                            src_bytes=it.quantized_bytes,
+                        )
+                        if save_path and not getattr(self._page, "web", False):
+                            Path(save_path).write_bytes(it.quantized_bytes)
+                        self._show_message(f"✅ Imagem '{it.filename}' salva com sucesso!", theme.SUCCESS)
+                    except Exception as exc:
+                        self._show_message(f"Erro ao salvar {it.filename}: {exc}", theme.ACCENT)
+
+            btn_save = ft.OutlinedButton(
+                content="💾 Baixar",
+                icon=ft.Icons.DOWNLOAD,
+                on_click=_save_single_item,
+            )
+
+            m = item.metrics
+            mse_str = f"{m.mse:.2f}" if m else "—"
+            psnr_str = f"{m.psnr:.2f} dB" if m else "—"
+            levels_str = f"{m.unique_levels} tons" if m else "—"
+
+            item_card = ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Text(f"📄 {item.filename}", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
+                                ft.Text(f"⏱️ {item.elapsed_seconds:.2f}s", size=theme.FONT_CAPTION, color=theme.TEXT_SECONDARY),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
+                        ft.Divider(height=1),
+                        ft.Row(
+                            controls=[
+                                ft.Column(
+                                    controls=[
+                                        ft.Text("Original", size=11, weight=ft.FontWeight.BOLD, color=theme.TEXT_SECONDARY),
+                                        ft.Container(
+                                            content=orig_img,
+                                            on_click=lambda _, it=item: open_zoom_dialog(
+                                                self._page, f"Original — {it.filename}", it.source_bytes
+                                            ),
+                                            ink=True,
+                                            tooltip="Clique para zoom no original",
+                                        ),
+                                    ],
+                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                ft.Icon(ft.Icons.ARROW_FORWARD, color=theme.PRIMARY_LIGHT, size=20),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text("Quantizada", size=11, weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT),
+                                        ft.Container(
+                                            content=quant_img,
+                                            on_click=lambda _, it=item: open_zoom_dialog(
+                                                self._page, f"Quantizada — {it.filename}", it.quantized_bytes
+                                            ),
+                                            ink=True,
+                                            tooltip="Clique para zoom na quantizada",
+                                        ),
+                                    ],
+                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                ft.Column(
+                                    controls=[
+                                        ft.Row(
+                                            controls=[
+                                                theme.metric_badge("MSE", mse_str),
+                                                theme.metric_badge("PSNR", psnr_str, color=theme.SUCCESS),
+                                                theme.metric_badge("Níveis", levels_str),
+                                            ],
+                                            spacing=6,
+                                            wrap=True,
+                                        ),
+                                        ft.Row(
+                                            controls=[btn_zoom, btn_inspect, btn_save],
+                                            spacing=6,
+                                            wrap=True,
+                                        ),
+                                    ],
+                                    spacing=8,
+                                ),
+                            ],
+                            spacing=14,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            wrap=True,
+                        ),
+                    ],
+                    spacing=8,
+                ),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                border_radius=10,
+                padding=12,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft, "Border") else None,
+            )
+            self._results_gallery.controls.append(item_card)
+
+        self._results_gallery_container.visible = bool(self._results_gallery.controls)
+        self._show_message(f"🎉 Lote concluído com sucesso ({result.success_count} imagens quantizadas)!")
         self._page.update()
+
+    async def _on_download_zip_clicked(self, _: ft.ControlEvent | None = None) -> None:
+        """Gera e baixa um arquivo ZIP contendo todas as imagens quantizadas."""
+        if not self._batch_result or not self._batch_result.items:
+            self._show_message("Nenhum resultado de lote disponível para exportação.", theme.WARNING)
+            return
+
+        try:
+            self._show_message("📦 Preparando arquivo ZIP do lote...", theme.INFO)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in self._batch_result.items:
+                    if item.success and item.quantized_bytes is not None:
+                        zf.writestr(f"quantizado_{item.filename}", item.quantized_bytes)
+
+            zip_bytes = buf.getvalue()
+            save_path = await self._save_picker.save_file(
+                dialog_title="Salvar Lote em ZIP",
+                file_name="lote_quantizado.zip",
+                allowed_extensions=["zip"],
+                src_bytes=zip_bytes,
+            )
+            if save_path and not getattr(self._page, "web", False):
+                Path(save_path).write_bytes(zip_bytes)
+            self._show_message("✅ Arquivo ZIP do lote salvo com sucesso!", theme.SUCCESS)
+        except Exception as exc:
+            self._show_message(f"Erro ao salvar ZIP: {exc}", theme.ACCENT)
+
+    async def _download_zip_action(self) -> None:
+        """Alias para compatibilidade legada."""
+        await self._on_download_zip_clicked()
 
     # -----------------------------------------------------------------------
     # Helpers Privados
     # -----------------------------------------------------------------------
 
+    def _reset_controls(self) -> None:
+        """Reabilita controles após término."""
+        self._is_processing = False
+        self._btn_start.disabled = False
+        self._btn_start_top.disabled = False
+        self._btn_input.disabled = False
+        self._btn_select_files.disabled = False
+        self._btn_sample_batch.disabled = False
+        self._btn_output.disabled = False
+
     def _update_start_button_state(self) -> None:
-        """Habilita o botão de início apenas quando ambas as pastas estão selecionadas."""
-        self._btn_start.disabled = not (self._input_dir and self._output_dir)
+        """Atualiza o estado de habilitação dos botões 'Iniciar'."""
+        has_input = bool(self._web_file_data or self._selected_images or self._input_dir or self._queue_items)
+        if not self._is_web and not self._output_dir:
+            self._output_dir = ASSETS_DIR / "lote_resultado"
+            self._output_label.value = str(self._output_dir)
+            self._output_label.italic = False
+            self._output_label.color = theme.TEXT_PRIMARY
+
+        self._btn_start.disabled = not has_input
+        self._btn_start_top.disabled = not has_input
+        self._page.update()
 
     def _get_selected_technique(self) -> QuantizationTechnique:
-        """Retorna a técnica de quantização selecionada no dropdown."""
-        value = int(self._technique_dropdown.value)
-        for technique in QuantizationTechnique:
-            if technique.value == value:
-                return technique
+        if isinstance(self._selected_technique, QuantizationTechnique):
+            return self._selected_technique
+        try:
+            int_v = int(self._selected_technique)
+            for t in QuantizationTechnique:
+                if t.value == int_v:
+                    return t
+        except Exception:
+            pass
         return QuantizationTechnique.UNIFORM
 
     def _get_selected_gray_method(self) -> GrayscaleMethod:
-        """Retorna o método de conversão para cinza selecionado no dropdown."""
-        value = int(self._gray_dropdown.value)
-        for method in GrayscaleMethod:
-            if method.value == value:
-                return method
-        return GrayscaleMethod.LUMINANCE
+        return self._selected_gray_method
+
+    def update_responsive_layout(
+        self, width: float | None = None, height: float | None = None
+    ) -> None:
+        """Adapta o layout da aba de lote às dimensões da tela."""
+        pass

@@ -55,13 +55,33 @@ FONT_CAPTION = 12     # Legendas, rótulos secundários
 FONT_MONO = 13        # Valores numéricos, métricas
 
 # ---------------------------------------------------------------------------
-# Constantes de Layout
+# Constantes de Layout & Responsividade
 # ---------------------------------------------------------------------------
 
 PADDING_PAGE = 20
 PADDING_CARD = 16
 BORDER_RADIUS = 12
 CARD_ELEVATION = 2
+
+BREAKPOINT_MOBILE = 720
+BREAKPOINT_TABLET = 1024
+
+
+def is_mobile(page_width: float | int | None) -> bool:
+    """Verifica se a largura da tela é considerada formato mobile/celular."""
+    if page_width is None:
+        return False
+    return float(page_width) < BREAKPOINT_MOBILE
+
+
+def get_page_padding(page_width: float | int | None) -> int:
+    """Retorna o padding de página adequado conforme a largura da viewport."""
+    return 10 if is_mobile(page_width) else PADDING_PAGE
+
+
+def get_card_padding(page_width: float | int | None) -> int:
+    """Retorna o padding de card adequado conforme a largura da viewport."""
+    return 10 if is_mobile(page_width) else PADDING_CARD
 
 # ---------------------------------------------------------------------------
 # Funções de Construção de Tema

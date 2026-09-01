@@ -12,7 +12,7 @@ Referências:
 from enum import Enum, auto
 
 import numpy as np
-from skimage import color, util
+
 
 
 class GrayscaleMethod(Enum):
@@ -216,7 +216,7 @@ def _ensure_uint8(image: np.ndarray) -> np.ndarray:
     if image.dtype == np.uint8:
         return image
     if np.issubdtype(image.dtype, np.floating):
-        return util.img_as_ubyte(np.clip(image, 0.0, 1.0))
+        return (np.clip(image, 0.0, 1.0) * 255).round().astype(np.uint8)
     return image.astype(np.uint8)
 
 

@@ -5,7 +5,6 @@ samples.py — Gerenciamento e carregamento de imagens de exemplo embutidas no a
 from pathlib import Path
 import numpy as np
 from PIL import Image
-import skimage.io as skio
 
 # Localização padrão dos assets
 ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
@@ -71,7 +70,10 @@ def get_sample_path(sample_name: str) -> Path:
 def load_sample_array(sample_name: str) -> np.ndarray:
     """Carrega e retorna a imagem de exemplo como array NumPy uint8 (RGB ou Cinza)."""
     path = get_sample_path(sample_name)
-    img_array = skio.imread(str(path))
+    with Image.open(path) as pil_img:
+        if pil_img.mode in ("RGBA", "LA", "P"):
+            pil_img = pil_img.convert("RGB")
+        img_array = np.array(pil_img)
     if img_array.ndim == 2:
         return img_array.astype(np.uint8)
     # Garante 3 canais RGB (descarta alpha se houver)

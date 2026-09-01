@@ -17,14 +17,12 @@ Permite ao usuário:
   - Salvar o resultado no disco no formato correspondente à visualização ativa.
 """
 
-import base64
 import io
 from pathlib import Path
 
 import flet as ft
 import numpy as np
 from PIL import Image
-from skimage import io as skio
 
 from src.core.grayscale import (
     GrayscaleMethod,
@@ -57,84 +55,15 @@ from src.core.samples import (
     load_sample_array,
 )
 from src.ui import theme
-
-
-# ---------------------------------------------------------------------------
-# Informações Didáticas dos Métodos de Conversão
-# ---------------------------------------------------------------------------
-
-_GRAYSCALE_DETAILS = {
-    GrayscaleMethod.LUMINANCE: {
-        "title": "Luminância ITU-R BT.601 (Padrão Perceptual)",
-        "formula": "Y = 0.2989·R + 0.5870·G + 0.1140·B",
-        "desc": "Ponderação perceptual padrão da visão humana (58.7% verde, 29.9% vermelho, 11.4% azul). Gera imagem monocromática.",
-        "icon": ft.Icons.VISIBILITY,
-    },
-    GrayscaleMethod.AVERAGE: {
-        "title": "Média Aritmética Simples",
-        "formula": "Y = (R + G + B) / 3",
-        "desc": "Média uniforme dos três canais RGB sem compensação fisiológica. Gera imagem monocromática.",
-        "icon": ft.Icons.CALCULATE,
-    },
-    GrayscaleMethod.CHANNEL_R: {
-        "title": "Isolamento do Canal Vermelho (R)",
-        "formula": "Matriz RGB pura: [R, 0, 0] (Tons de Vermelho)",
-        "desc": "Isola e exibe exclusivamente o canal vermelho em cores reais; quantização em níveis da cor vermelha.",
-        "icon": ft.Icons.LOOKS_ONE,
-    },
-    GrayscaleMethod.CHANNEL_G: {
-        "title": "Isolamento do Canal Verde (G)",
-        "formula": "Matriz RGB pura: [0, G, 0] (Tons de Verde)",
-        "desc": "Isola e exibe exclusivamente o canal verde em cores reais; quantização em níveis da cor verde.",
-        "icon": ft.Icons.LOOKS_TWO,
-    },
-    GrayscaleMethod.CHANNEL_B: {
-        "title": "Isolamento do Canal Azul (B)",
-        "formula": "Matriz RGB pura: [0, 0, B] (Tons de Azul)",
-        "desc": "Isola e exibe exclusivamente o canal azul em cores reais; quantização em níveis da cor azul.",
-        "icon": ft.Icons.LOOKS_3,
-    },
-}
-
-
-_TECHNIQUE_OPTIONS = [
-    (QuantizationTechnique.UNIFORM, "Modo 1: Quantização Uniforme (Intervalos Iguais)"),
-    (QuantizationTechnique.KMEANS, "Modo 2: Quantização Não-Uniforme (K-Means Adaptativo)"),
-    (QuantizationTechnique.HISTOGRAM, "Modo 3: Quantização por Histograma (Frequência/Quantis)"),
-    ("BOTH", "Modo 4: Comparação Completa (Script Histograma Comparativo 2×3)"),
-]
-
-
-# ---------------------------------------------------------------------------
-# Helpers de Compatibilidade e Utilitários de Imagem
-# ---------------------------------------------------------------------------
-
-
-def _register_file_pickers(page: ft.Page, *pickers: ft.FilePicker) -> None:
-    """Registra os FilePickers como serviços na página (Flet 0.86+)."""
-    if hasattr(page, "services") and hasattr(page.services, "register_service"):
-        for picker in pickers:
-            page.services.register_service(picker)
-
-
-def _ndarray_to_png_bytes(arr: np.ndarray) -> bytes:
-    """Converte um array NumPy uint8 em bytes PNG em memória."""
-    if arr.ndim == 3 and arr.shape[2] == 4:
-        # Se for RGBA converte
-        pil_img = Image.fromarray(arr, mode="RGBA")
-    elif arr.ndim == 3 and arr.shape[2] == 3:
-        pil_img = Image.fromarray(arr, mode="RGB")
-    else:
-        pil_img = Image.fromarray(arr, mode="L")
-    buffer = io.BytesIO()
-    pil_img.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _bytes_to_data_uri(image_bytes: bytes) -> str:
-    """Converte bytes de imagem PNG em Data URI Base64 para exibição no Flet."""
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+from src.ui.common import (
+    _GRAYSCALE_DETAILS,
+    _TECHNIQUE_OPTIONS,
+    _bytes_to_data_uri,
+    _ndarray_to_png_bytes,
+    _read_image_file,
+    _register_file_pickers,
+)
+from src.ui.dialogs import open_inspector_dialog, open_zoom_dialog
 
 
 # ---------------------------------------------------------------------------
@@ -375,14 +304,28 @@ class SingleView(ft.Column):
             label="{value} bits",
             active_color=theme.PRIMARY,
             thumb_color=theme.PRIMARY_LIGHT,
+            expand=True,
             on_change=self._on_bits_changed,
         )
 
         # Badges de métricas
+        self._badge_tech = theme.metric_badge("Técnica", "—", color=theme.SUCCESS)
+        self._badge_gray_method = theme.metric_badge("Método", "—", color=theme.PRIMARY_LIGHT)
         self._badge_mse = theme.metric_badge("MSE", "—")
         self._badge_psnr = theme.metric_badge("PSNR", "—", color=theme.SUCCESS)
         self._badge_levels = theme.metric_badge("Níveis", "—")
         self._badge_time = theme.metric_badge("Tempo", "—", color=theme.WARNING)
+        self._comp_metrics_box = ft.Container(visible=False)
+
+        # Botão para Inspecionar o Pipeline Didático ("Entranhas do Processo")
+        self._btn_inspect = ft.Button(
+            content="🔬 Entranhas do Processo",
+            icon=ft.Icons.ANALYTICS,
+            on_click=lambda _: self._open_inspector_dialog(),
+            bgcolor=theme.ACCENT,
+            color="#FFFFFF",
+            disabled=True,
+        )
 
         # Seletor de Modo de Visualização do Resultado
         self._view_mode_buttons = ft.SegmentedButton(
@@ -493,56 +436,62 @@ class SingleView(ft.Column):
             on_click=lambda _: self._open_side_quant_zoom(),
         )
 
+        self._orig_side_img_box = ft.Container(
+            content=self._orig_side_img,
+            height=380,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+            on_click=lambda _: self._open_side_orig_zoom(),
+            ink=True,
+            tooltip="Clique para ampliar a imagem original",
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            padding=6,
+        )
+        self._orig_side_col = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[self._orig_side_label, self._btn_orig_side_zoom],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._orig_side_img_box,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+
+        self._quant_side_img_box = ft.Container(
+            content=self._quant_side_img,
+            height=380,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+            on_click=lambda _: self._open_side_quant_zoom(),
+            ink=True,
+            tooltip="Clique para ampliar a imagem quantizada",
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            padding=6,
+        )
+        self._quant_side_col = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Text("Imagem Quantizada", weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT),
+                        self._btn_quant_side_zoom,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._quant_side_img_box,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+
         self._side_by_side_container = ft.Row(
             controls=[
-                ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[self._orig_side_label, self._btn_orig_side_zoom],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=self._orig_side_img,
-                            height=380,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                            on_click=lambda _: self._open_side_orig_zoom(),
-                            ink=True,
-                            tooltip="Clique para ampliar a imagem original",
-                            border_radius=8,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                            padding=6,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    expand=True,
-                ),
+                self._orig_side_col,
                 ft.VerticalDivider(width=1),
-                ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text("Imagem Quantizada", weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT),
-                                self._btn_quant_side_zoom,
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=self._quant_side_img,
-                            height=380,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                            on_click=lambda _: self._open_side_quant_zoom(),
-                            ink=True,
-                            tooltip="Clique para ampliar a imagem quantizada",
-                            border_radius=8,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                            padding=6,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    expand=True,
-                ),
+                self._quant_side_col,
             ],
             spacing=16,
             expand=True,
@@ -554,100 +503,109 @@ class SingleView(ft.Column):
         self._triple_gray_img = ft.Image(src="", fit=box_fit, expand=True)
         self._triple_quant_img = ft.Image(src="", fit=box_fit, expand=True)
 
+        self._triple_color_img_box = ft.Container(
+            content=self._triple_color_img,
+            height=340,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+            on_click=lambda _: self._open_zoom_dialog("1. Original Colorida (RGB)", self._color_image_bytes),
+            ink=True,
+            tooltip="Clique para ampliar a imagem colorida",
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            padding=4,
+        )
+        self._triple_color_col = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Text("1. Original RGB", weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT, size=theme.FONT_CAPTION),
+                        ft.IconButton(
+                            icon=ft.Icons.ZOOM_IN,
+                            icon_size=18,
+                            tooltip="Ampliar Imagem Colorida",
+                            on_click=lambda _: self._open_zoom_dialog("1. Original Colorida (RGB)", self._color_image_bytes),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._triple_color_img_box,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+
+        self._triple_gray_img_box = ft.Container(
+            content=self._triple_gray_img,
+            height=340,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+            on_click=lambda _: self._open_zoom_dialog("2. Tons de Cinza (8 bits)", self._gray_image_bytes),
+            ink=True,
+            tooltip="Clique para ampliar a imagem em tons de cinza",
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            padding=4,
+        )
+        self._triple_gray_col = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Text("2. Tons de Cinza", weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT, size=theme.FONT_CAPTION),
+                        ft.IconButton(
+                            icon=ft.Icons.ZOOM_IN,
+                            icon_size=18,
+                            tooltip="Ampliar Imagem Tons de Cinza",
+                            on_click=lambda _: self._open_zoom_dialog("2. Tons de Cinza (8 bits)", self._gray_image_bytes),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._triple_gray_img_box,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+
+        self._triple_quant_img_box = ft.Container(
+            content=self._triple_quant_img,
+            height=340,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+            on_click=lambda _: self._open_zoom_dialog(f"3. Quantizada ({self._bits_value} bits)", self._quantized_image_bytes),
+            ink=True,
+            tooltip="Clique para ampliar a imagem quantizada",
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            padding=4,
+        )
+        self._triple_quant_col = ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Text("3. Quantizada", weight=ft.FontWeight.BOLD, color=theme.SUCCESS, size=theme.FONT_CAPTION),
+                        ft.IconButton(
+                            icon=ft.Icons.ZOOM_IN,
+                            icon_size=18,
+                            tooltip="Ampliar Imagem Quantizada",
+                            on_click=lambda _: self._open_zoom_dialog(f"3. Quantizada ({self._bits_value} bits)", self._quantized_image_bytes),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._triple_quant_img_box,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            expand=True,
+        )
+
         self._triple_container = ft.Row(
             controls=[
-                ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text("1. Original RGB", weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT, size=theme.FONT_CAPTION),
-                                ft.IconButton(
-                                    icon=ft.Icons.ZOOM_IN,
-                                    icon_size=18,
-                                    tooltip="Ampliar Imagem Colorida",
-                                    on_click=lambda _: self._open_zoom_dialog("1. Original Colorida (RGB)", self._color_image_bytes),
-                                ),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=self._triple_color_img,
-                            height=340,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                            on_click=lambda _: self._open_zoom_dialog("1. Original Colorida (RGB)", self._color_image_bytes),
-                            ink=True,
-                            tooltip="Clique para ampliar a imagem colorida",
-                            border_radius=8,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                            padding=4,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    expand=True,
-                ),
+                self._triple_color_col,
                 ft.VerticalDivider(width=1),
-                ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text("2. Tons de Cinza", weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT, size=theme.FONT_CAPTION),
-                                ft.IconButton(
-                                    icon=ft.Icons.ZOOM_IN,
-                                    icon_size=18,
-                                    tooltip="Ampliar Imagem Tons de Cinza",
-                                    on_click=lambda _: self._open_zoom_dialog("2. Tons de Cinza (8 bits)", self._gray_image_bytes),
-                                ),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=self._triple_gray_img,
-                            height=340,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                            on_click=lambda _: self._open_zoom_dialog("2. Tons de Cinza (8 bits)", self._gray_image_bytes),
-                            ink=True,
-                            tooltip="Clique para ampliar a imagem em tons de cinza",
-                            border_radius=8,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                            padding=4,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    expand=True,
-                ),
+                self._triple_gray_col,
                 ft.VerticalDivider(width=1),
-                ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text("3. Quantizada", weight=ft.FontWeight.BOLD, color=theme.SUCCESS, size=theme.FONT_CAPTION),
-                                ft.IconButton(
-                                    icon=ft.Icons.ZOOM_IN,
-                                    icon_size=18,
-                                    tooltip="Ampliar Imagem Quantizada",
-                                    on_click=lambda _: self._open_zoom_dialog(f"3. Quantizada ({self._bits_value} bits)", self._quantized_image_bytes),
-                                ),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=self._triple_quant_img,
-                            height=340,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                            on_click=lambda _: self._open_zoom_dialog(f"3. Quantizada ({self._bits_value} bits)", self._quantized_image_bytes),
-                            ink=True,
-                            tooltip="Clique para ampliar a imagem quantizada",
-                            border_radius=8,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                            padding=4,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    expand=True,
-                ),
+                self._triple_quant_col,
             ],
             spacing=10,
             expand=True,
@@ -709,9 +667,9 @@ class SingleView(ft.Column):
             color="#FFFFFF",
         )
         self._btn_sample_portrait = ft.OutlinedButton(
-            content="👤 Retrato RGB",
-            tooltip="Retrato RGB (512×512) • Foto colorida com tons de pele, texturas e detalhes faciais.",
-            on_click=lambda _: self._on_select_sample(SAMPLE_PORTRAIT_NAME, "Exemplo 1: Retrato RGB"),
+            content="🛰️ Imagem Aérea",
+            tooltip="Imagem de satélite (512×512) • Foto colorida, texturas e detalhes de terreno.",
+            on_click=lambda _: self._on_select_sample(SAMPLE_PORTRAIT_NAME, "Exemplo 1: Imagem Aérea"),
         )
         self._btn_sample_benchmark = ft.OutlinedButton(
             content="📊 Benchmark",
@@ -802,8 +760,8 @@ class SingleView(ft.Column):
                         ft.Divider(height=1),
                         # Seção de seleção do algoritmo de tons de cinza
                         ft.Text("Método de Conversão para Tons de Cinza:", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE),
-                        self._gray_category_selector,
-                        self._gray_options_selector,
+                        ft.Row(controls=[self._gray_category_selector], scroll=ft.ScrollMode.AUTO, alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row(controls=[self._gray_options_selector], scroll=ft.ScrollMode.AUTO, alignment=ft.MainAxisAlignment.CENTER),
                         self._gray_info_box,
                         ft.Divider(height=1),
                         ft.Text("Técnica de Quantização:", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE),
@@ -831,6 +789,7 @@ class SingleView(ft.Column):
                                     color=ft.Colors.ON_SURFACE_VARIANT,
                                     size=theme.FONT_CAPTION,
                                     weight=ft.FontWeight.NORMAL,
+                                    text_align=ft.TextAlign.CENTER,
                                 ),
                             ],
                             spacing=6,
@@ -841,6 +800,7 @@ class SingleView(ft.Column):
                                 self._btn_process,
                                 self._btn_convert_gray_only,
                                 self._btn_save,
+                                self._btn_inspect,
                             ],
                             spacing=12,
                             wrap=True,
@@ -862,18 +822,21 @@ class SingleView(ft.Column):
             theme.card(
                 ft.Column(
                     controls=[
-                        theme.section_title("📊  Métricas de Qualidade"),
+                        theme.section_title("📊  Métricas de Qualidade & Identificação"),
                         ft.Divider(height=1),
                         ft.Row(
                             controls=[
+                                self._badge_tech,
+                                self._badge_gray_method,
                                 self._badge_mse,
                                 self._badge_psnr,
                                 self._badge_levels,
                                 self._badge_time,
                             ],
-                            spacing=12,
+                            spacing=10,
                             wrap=True,
                         ),
+                        self._comp_metrics_box,
                         ft.Text(
                             "MSE: erro quadrático médio por pixel (menor = melhor) · "
                             "PSNR: relação sinal-ruído de pico em dB (maior = melhor)",
@@ -891,11 +854,12 @@ class SingleView(ft.Column):
                         ft.Row(
                             controls=[
                                 theme.section_title("🖼️  Visualização do Resultado"),
-                                self._view_mode_buttons,
+                                ft.Row(controls=[self._view_mode_buttons], scroll=ft.ScrollMode.AUTO),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             wrap=True,
+                            spacing=10,
                         ),
                         self._zoom_toolbar,
                         ft.Divider(height=1),
@@ -914,157 +878,60 @@ class SingleView(ft.Column):
     # -----------------------------------------------------------------------
 
     def _open_zoom_dialog(self, title: str, image_bytes: bytes | str | None) -> None:
-        """
-        Abre um pop-up modal (AlertDialog) dedicado e isolado para visualização
-        de imagem em alta resolução com ferramentas completas de zoom e pan.
-        """
-        if image_bytes is None:
-            return
+        """Abre o visualizador modal com zoom interativo."""
+        open_zoom_dialog(self._page, title, image_bytes)
 
-        data_uri = image_bytes if isinstance(image_bytes, str) else _bytes_to_data_uri(image_bytes)
+    def update_responsive_layout(self, width: float | None = None, height: float | None = None) -> None:
+        """Adapta o layout da view conforme as dimensões da viewport."""
+        w = width if width is not None else getattr(self._page, "width", None)
+        is_mob = theme.is_mobile(w)
 
-        scale_val = [1.0]
-
-        zoom_label = ft.Text(
-            "100%",
-            weight=ft.FontWeight.BOLD,
-            size=theme.FONT_BODY,
-            color=ft.Colors.ON_SURFACE,
-        )
-
-        img_control = ft.Image(
-            src=data_uri,
-            fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
-        )
-
-        interactive_viewer = ft.InteractiveViewer(
-            content=img_control,
-            pan_enabled=True,
-            scale_enabled=True,
-            min_scale=0.2,
-            max_scale=10.0,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            expand=True,
-        )
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            content_padding=12,
-            title_padding=ft.Padding.only(left=20, top=16, right=16, bottom=8) if hasattr(ft, "Padding") else 16,
-            actions_padding=ft.Padding.only(left=20, right=20, bottom=16) if hasattr(ft, "Padding") else 16,
-        )
-
-        def _close_dialog(e: ft.ControlEvent = None) -> None:
-            dialog.open = False
-            self._page.pop_dialog()
-            self._page.update()
-
-        def _update_zoom_ui() -> None:
-            zoom_label.value = f"{int(scale_val[0] * 100)}%"
-            dialog.update()
-
-        def _on_zoom_in(e: ft.ControlEvent) -> None:
-            scale_val[0] = round(min(10.0, scale_val[0] + 0.25), 2)
-            img_control.scale = ft.Scale(scale_val[0])
-            _update_zoom_ui()
-
-        def _on_zoom_out(e: ft.ControlEvent) -> None:
-            scale_val[0] = round(max(0.25, scale_val[0] - 0.25), 2)
-            img_control.scale = ft.Scale(scale_val[0])
-            _update_zoom_ui()
-
-        def _on_zoom_reset(e: ft.ControlEvent) -> None:
-            scale_val[0] = 1.0
-            img_control.scale = ft.Scale(1.0)
-            _update_zoom_ui()
-
-        dialog.title = ft.Row(
-            controls=[
-                ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.ZOOM_IN, size=24, color=theme.PRIMARY_LIGHT),
-                        ft.Text(
-                            title,
-                            weight=ft.FontWeight.BOLD,
-                            size=theme.FONT_TITLE,
-                            color=ft.Colors.ON_SURFACE,
-                        ),
-                    ],
-                    spacing=8,
-                ),
-                ft.Row(
-                    controls=[
-                        ft.IconButton(
-                            icon=ft.Icons.ZOOM_OUT,
-                            tooltip="Diminuir Zoom (-25%)",
-                            on_click=_on_zoom_out,
-                        ),
-                        ft.Container(
-                            content=zoom_label,
-                            padding=ft.Padding.symmetric(horizontal=6) if hasattr(ft, "Padding") else 6,
-                            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.ZOOM_IN,
-                            tooltip="Aumentar Zoom (+25%)",
-                            on_click=_on_zoom_in,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.RESTART_ALT,
-                            tooltip="Resetar Zoom (100%)",
-                            on_click=_on_zoom_reset,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.CLOSE,
-                            tooltip="Fechar",
-                            on_click=_close_dialog,
-                        ),
-                    ],
-                    spacing=4,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-        dialog.content = ft.Container(
-            content=interactive_viewer,
-            width=960,
-            height=580,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            border_radius=8,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-        )
-
-        dialog.actions = [
-            ft.Row(
-                controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.MOUSE, size=16, color=theme.PRIMARY_LIGHT),
-                            ft.Text(
-                                "💡 Dica: Use a roda do mouse ou os botões de zoom acima. Arraste com o cursor para mover a imagem (Pan).",
-                                size=theme.FONT_CAPTION,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                        ],
-                        spacing=6,
-                    ),
-                    ft.Button(
-                        content="Fechar",
-                        icon=ft.Icons.CHECK,
-                        on_click=_close_dialog,
-                        bgcolor=theme.PRIMARY,
-                        color="#FFFFFF",
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                expand=True,
-            )
-        ]
-
-        self._page.show_dialog(dialog)
-        self._page.update()
+        if is_mob:
+            self._side_by_side_container.controls = [
+                self._orig_side_col,
+                ft.Divider(height=1),
+                self._quant_side_col,
+            ]
+            self._triple_container.controls = [
+                self._triple_color_col,
+                ft.Divider(height=1),
+                self._triple_gray_col,
+                ft.Divider(height=1),
+                self._triple_quant_col,
+            ]
+            self._orig_side_img_box.height = 280
+            self._quant_side_img_box.height = 280
+            self._triple_color_img_box.height = 260
+            self._triple_gray_img_box.height = 260
+            self._triple_quant_img_box.height = 260
+            self._orig_side_col.expand = False
+            self._quant_side_col.expand = False
+            self._triple_color_col.expand = False
+            self._triple_gray_col.expand = False
+            self._triple_quant_col.expand = False
+        else:
+            self._side_by_side_container.controls = [
+                self._orig_side_col,
+                ft.VerticalDivider(width=1),
+                self._quant_side_col,
+            ]
+            self._triple_container.controls = [
+                self._triple_color_col,
+                ft.VerticalDivider(width=1),
+                self._triple_gray_col,
+                ft.VerticalDivider(width=1),
+                self._triple_quant_col,
+            ]
+            self._orig_side_img_box.height = 380
+            self._quant_side_img_box.height = 380
+            self._triple_color_img_box.height = 340
+            self._triple_gray_img_box.height = 340
+            self._triple_quant_img_box.height = 340
+            self._orig_side_col.expand = True
+            self._quant_side_col.expand = True
+            self._triple_color_col.expand = True
+            self._triple_gray_col.expand = True
+            self._triple_quant_col.expand = True
 
     def _open_active_single_zoom(self) -> None:
         """Abre o visualizador de zoom para o modo ativo de imagem única / gráfico."""
@@ -1230,30 +1097,53 @@ class SingleView(ft.Column):
             self._show_message(f"Erro ao carregar imagem de exemplo: {exc}", theme.ACCENT)
 
     async def _on_select_image(self, _: ft.ControlEvent) -> None:
-        """Abre o FilePicker para seleção de imagem."""
-        files = await self._file_picker.pick_files(
-            dialog_title="Selecionar Imagem",
-            allowed_extensions=["png", "jpg", "jpeg", "bmp", "tiff", "webp"],
-            allow_multiple=False,
-        )
+        """Abre o FilePicker para seleção de imagem no Desktop e Web."""
+        try:
+            files = await self._file_picker.pick_files(
+                dialog_title="Selecionar Imagem",
+                allowed_extensions=["png", "jpg", "jpeg", "bmp", "tiff", "webp"],
+                allow_multiple=False,
+                with_data=True,
+            )
+        except Exception as exc:
+            self._show_message(f"Erro ao abrir seletor: {exc}", theme.ACCENT)
+            return
+
         if files and len(files) > 0:
             file_obj = files[0]
+            file_name = getattr(file_obj, "name", "imagem.png") or "imagem.png"
             file_path = getattr(file_obj, "path", None)
-            if file_path:
-                self._source_path = Path(file_path)
-                self._loaded_array = None
-                self._path_label.value = str(self._source_path)
+            file_bytes = getattr(file_obj, "bytes", None)
+
+            img_arr: np.ndarray | None = None
+            try:
+                if file_bytes is not None:
+                    with Image.open(io.BytesIO(file_bytes)) as pil_img:
+                        if pil_img.mode in ("RGBA", "LA", "P"):
+                            pil_img = pil_img.convert("RGB")
+                        img_arr = np.array(pil_img)
+                    if file_path:
+                        self._source_path = Path(file_path)
+                    else:
+                        self._source_path = None
+                elif file_path:
+                    self._source_path = Path(file_path)
+                    img_arr = _read_image_file(self._source_path)
+            except Exception as exc:
+                self._show_message(f"Erro ao decodificar imagem selecionada: {exc}", theme.ACCENT)
+                return
+
+            if img_arr is not None:
+                self._loaded_array = img_arr
+                if self._source_path:
+                    self._path_label.value = str(self._source_path)
+                else:
+                    self._path_label.value = f"🌐 Arquivo Web: {file_name}"
+
                 self._path_label.italic = False
                 self._path_label.color = ft.Colors.ON_SURFACE
                 self._btn_process.disabled = False
                 self._btn_convert_gray_only.disabled = False
-
-                # Carrega o array para o preview imediato
-                try:
-                    img_arr = skio.imread(str(self._source_path))
-                    self._update_input_preview(self._source_path.name, img_arr, is_sample=False)
-                except Exception:
-                    pass
 
                 # Reseta estado anterior
                 self._raw_image = None
@@ -1266,6 +1156,7 @@ class SingleView(ft.Column):
                 self._color_image_bytes = None
 
                 self._btn_save.disabled = True
+                self._btn_inspect.disabled = True
                 self._view_mode_buttons.visible = False
                 self._single_display_container.visible = False
                 self._side_by_side_container.visible = False
@@ -1273,7 +1164,11 @@ class SingleView(ft.Column):
                 self._zoom_toolbar.visible = False
                 self._result_placeholder.visible = True
                 self._reset_metrics()
+
+                # Atualiza o preview imediato da imagem de entrada
+                self._update_input_preview(file_name, img_arr, is_sample=False)
                 self._page.update()
+                self._show_message(f"'{file_name}' carregada! Clique em 'Quantizar Imagem' ou no preview para ampliar.", theme.PRIMARY)
 
     def _on_technique_changed(self, event: ft.ControlEvent) -> None:
         """Atualiza a técnica de quantização selecionada."""
@@ -1304,7 +1199,8 @@ class SingleView(ft.Column):
 
     def _on_process(self, _: ft.ControlEvent) -> None:
         """Inicia o processamento."""
-        if self._source_path is None:
+        if self._source_path is None and self._loaded_array is None:
+            self._show_message("Selecione ou carregue uma imagem primeiro.", theme.WARNING)
             return
 
         self._set_processing_state(True)
@@ -1315,34 +1211,39 @@ class SingleView(ft.Column):
             threading.Thread(target=self._run_processing, daemon=True).start()
 
     async def _on_save(self, _: ft.ControlEvent) -> None:
-        """Abre o FilePicker para salvar o resultado ativo no disco."""
-        if self._source_path is None:
+        """Abre o FilePicker para salvar o resultado ativo no disco ou download na web."""
+        if self._source_path is None and self._loaded_array is None:
             return
 
         ch_name = get_channel_color_name(self._selected_gray_method).lower() if is_channel_isolation(self._selected_gray_method) else "cinza"
+        stem = self._source_path.stem if self._source_path else "imagem"
 
         # Determina o buffer e sufixo com base no modo de visualização ativo
         if self._active_view_mode == "image" and self._quantized_image_bytes:
             data_to_save = self._quantized_image_bytes
-            default_name = f"{self._source_path.stem}_quantizada_{ch_name}_{self._bits_value}bits.png"
+            default_name = f"{stem}_quantizada_{ch_name}_{self._bits_value}bits.png"
         elif self._active_view_mode == "color_graph" and self._color_graph_bytes:
             data_to_save = self._color_graph_bytes
-            default_name = f"{self._source_path.stem}_grafico_colorido_{self._bits_value}bits.png"
+            default_name = f"{stem}_grafico_colorido_{self._bits_value}bits.png"
         else:
             data_to_save = self._graph_bytes
-            default_name = f"{self._source_path.stem}_grafico_{ch_name}_{self._bits_value}bits.png"
+            default_name = f"{stem}_grafico_{ch_name}_{self._bits_value}bits.png"
 
         if data_to_save is None:
             return
 
-        save_path = await self._save_picker.save_file(
-            dialog_title="Salvar Resultado",
-            file_name=default_name,
-            allowed_extensions=["png"],
-        )
-        if save_path:
-            Path(save_path).write_bytes(data_to_save)
+        try:
+            save_path = await self._save_picker.save_file(
+                dialog_title="Salvar Resultado",
+                file_name=default_name,
+                allowed_extensions=["png"],
+                src_bytes=data_to_save,
+            )
+            if save_path and not getattr(self._page, "web", False):
+                Path(save_path).write_bytes(data_to_save)
             self._show_message("Arquivo salvo com sucesso!", theme.SUCCESS)
+        except Exception as exc:
+            self._show_message(f"Erro ao salvar arquivo: {exc}", theme.ACCENT)
 
     # -----------------------------------------------------------------------
     # Lógica de Processamento
@@ -1357,7 +1258,7 @@ class SingleView(ft.Column):
             if self._loaded_array is not None:
                 image_array = self._loaded_array.copy()
             else:
-                image_array = skio.imread(str(self._source_path))
+                image_array = _read_image_file(self._source_path)
 
             self._raw_image = image_array
             self._is_color = bool(image_array.ndim == 3 and image_array.shape[2] >= 3)
@@ -1397,11 +1298,13 @@ class SingleView(ft.Column):
 
                 self._quantized_image = display_kmeans
                 self._quantized_image_bytes = _ndarray_to_png_bytes(display_kmeans)
+                m_label = method_label(self._selected_gray_method)
                 self._graph_bytes = generate_full_comparison_figure(
                     original=display_source,
                     uniform=display_uniform,
                     kmeans=display_kmeans,
                     bits=self._bits_value,
+                    gray_method_name=m_label,
                     hist_color_unif=hist_color,
                     hist_color_km="#e8624a" if not is_channel_isolation(self._selected_gray_method) else hist_color,
                 )
@@ -1411,9 +1314,12 @@ class SingleView(ft.Column):
                     bits=self._bits_value,
                     technique_name="K-Means (Comparação)",
                     gray_image=display_source,
+                    gray_method_name=m_label,
                 )
                 elapsed = time.perf_counter() - start_time
-                self._update_metrics_comparison(elapsed)
+                m_unif = calculate_metrics(gray, uniform, self._bits_value)
+                m_km = calculate_metrics(gray, kmeans, self._bits_value)
+                self._update_metrics_comparison(m_unif, m_km, elapsed)
             else:
                 technique = self._selected_technique_key
                 quantized = quantize(gray, bits=self._bits_value, technique=technique)
@@ -1426,11 +1332,13 @@ class SingleView(ft.Column):
                 self._quantized_image = display_quantized
                 self._quantized_image_bytes = _ndarray_to_png_bytes(display_quantized)
                 t_name = technique_label(technique)
+                m_label = method_label(self._selected_gray_method)
                 self._graph_bytes = generate_comparison_figure(
                     original=display_source,
                     quantized=display_quantized,
                     bits=self._bits_value,
                     technique_name=t_name,
+                    gray_method_name=m_label,
                     hist_color=hist_color,
                 )
                 self._color_graph_bytes = generate_color_comparison_figure(
@@ -1439,10 +1347,11 @@ class SingleView(ft.Column):
                     bits=self._bits_value,
                     technique_name=t_name,
                     gray_image=display_source,
+                    gray_method_name=m_label,
                 )
                 elapsed = time.perf_counter() - start_time
                 metrics = calculate_metrics(gray, quantized, self._bits_value)
-                self._update_metrics(metrics, elapsed)
+                self._update_metrics(metrics, elapsed, t_name, m_label)
 
             self._view_mode_buttons.visible = True
             self._render_active_view_mode()
@@ -1462,7 +1371,7 @@ class SingleView(ft.Column):
             if self._loaded_array is not None:
                 image_array = self._loaded_array.copy()
             else:
-                image_array = skio.imread(str(self._source_path))
+                image_array = _read_image_file(self._source_path)
 
             self._raw_image = image_array
             self._is_color = bool(image_array.ndim == 3 and image_array.shape[2] >= 3)
@@ -1498,19 +1407,20 @@ class SingleView(ft.Column):
             self._view_mode_buttons.visible = True
             self._view_mode_buttons.selected = ["image"]
             self._active_view_mode = "image"
-            self._btn_save.disabled = False
-            self._page.update()
-
-            save_path = await self._save_picker.save_file(
-                dialog_title=dialog_title,
-                file_name=default_name,
-                allowed_extensions=["png"],
-            )
-            if save_path:
-                Path(save_path).write_bytes(self._gray_image_bytes)
+            try:
+                save_path = await self._save_picker.save_file(
+                    dialog_title=dialog_title,
+                    file_name=default_name,
+                    allowed_extensions=["png"],
+                    src_bytes=self._gray_image_bytes,
+                )
+                if save_path and not getattr(self._page, "web", False):
+                    Path(save_path).write_bytes(self._gray_image_bytes)
                 self._show_message(success_msg, theme.SUCCESS)
+            except Exception as exc:
+                self._show_message(f"Erro ao salvar arquivo: {exc}", theme.ACCENT)
         except Exception as exc:
-            self._show_message(f"Erro ao salvar canal/tons de cinza: {exc}", theme.ACCENT)
+            self._show_message(f"Erro ao converter canal/tons de cinza: {exc}", theme.ACCENT)
 
     # -----------------------------------------------------------------------
     # Atualização de UI e Modos de Visualização
@@ -1525,6 +1435,9 @@ class SingleView(ft.Column):
         self._single_display_container.visible = False
         self._side_by_side_container.visible = False
         self._triple_container.visible = False
+
+        t_name = "K-Means (Comparação)" if self._selected_technique_key == "BOTH" else (technique_label(self._selected_technique_key) if isinstance(self._selected_technique_key, QuantizationTechnique) else str(self._selected_technique_key))
+        m_name = method_label(self._selected_gray_method)
 
         if self._active_view_mode == "graph":
             # Modo 1: Gráficos e Histogramas Cinza / Canal
@@ -1551,7 +1464,8 @@ class SingleView(ft.Column):
                     ch_name = get_channel_color_name(self._selected_gray_method)
                     self._orig_side_label.value = f"Canal {ch_name} (Original)"
                 else:
-                    self._orig_side_label.value = "Imagem em Tons de Cinza (Original)"
+                    self._orig_side_label.value = f"Entrada em Tons de Cinza ({m_name})"
+                self._quant_side_col.controls[0].controls[0].value = f"Quantizada ({t_name}) — {self._bits_value}b"
                 self._orig_side_img.src = _bytes_to_data_uri(self._gray_image_bytes)
                 self._quant_side_img.src = _bytes_to_data_uri(self._quantized_image_bytes)
                 self._side_by_side_container.visible = True
@@ -1560,6 +1474,7 @@ class SingleView(ft.Column):
             # Modo 5: Comparação lado a lado (Original Colorida × Quantizada)
             if self._color_image_bytes and self._quantized_image_bytes:
                 self._orig_side_label.value = "Imagem Original Colorida (RGB)"
+                self._quant_side_col.controls[0].controls[0].value = f"Quantizada ({t_name}) — {self._bits_value}b"
                 self._orig_side_img.src = _bytes_to_data_uri(self._color_image_bytes)
                 self._quant_side_img.src = _bytes_to_data_uri(self._quantized_image_bytes)
                 self._side_by_side_container.visible = True
@@ -1567,13 +1482,14 @@ class SingleView(ft.Column):
         elif self._active_view_mode == "triple":
             # Modo 6: Grade Tripla (Colorida × Cinza/Canal × Quantizada)
             if self._color_image_bytes and self._gray_image_bytes and self._quantized_image_bytes:
+                self._triple_gray_col.controls[0].controls[0].value = f"2. Tons de Cinza ({m_name})"
+                self._triple_quant_col.controls[0].controls[0].value = f"3. Quantizada ({t_name} • {self._bits_value}b)"
                 self._triple_color_img.src = _bytes_to_data_uri(self._color_image_bytes)
                 self._triple_gray_img.src = _bytes_to_data_uri(self._gray_image_bytes)
                 self._triple_quant_img.src = _bytes_to_data_uri(self._quantized_image_bytes)
                 self._triple_container.visible = True
 
         self._page.update()
-
 
     def _set_processing_state(self, is_processing: bool) -> None:
         """Alterna o estado da UI entre processando e disponível."""
@@ -1585,27 +1501,62 @@ class SingleView(ft.Column):
         self.controls[1].visible = is_processing
         self._page.update()
 
-    def _update_metrics(self, metrics, elapsed: float) -> None:
+    def _update_metrics(self, metrics, elapsed: float, tech_name: str, method_name: str) -> None:
         """Atualiza os badges de métricas com os valores calculados."""
+        self._badge_tech.content.controls[1].value = tech_name
+        self._badge_gray_method.content.controls[1].value = method_name
         self._badge_mse.content.controls[1].value = f"{metrics.mse:.2f}"
         psnr_str = f"{metrics.psnr:.2f} dB" if metrics.psnr != float("inf") else "∞ dB"
         self._badge_psnr.content.controls[1].value = psnr_str
         self._badge_levels.content.controls[1].value = str(metrics.unique_levels)
         self._badge_time.content.controls[1].value = f"{elapsed:.2f}s"
+        self._comp_metrics_box.visible = False
+        self._btn_inspect.disabled = False
         self._page.update()
 
-    def _update_metrics_comparison(self, elapsed: float) -> None:
-        """Reseta badges de métricas para o modo de comparação completa."""
-        self._badge_mse.content.controls[1].value = "ver gráfico"
-        self._badge_psnr.content.controls[1].value = "ver gráfico"
+    def _update_metrics_comparison(self, m_unif, m_km, elapsed: float) -> None:
+        """Atualiza os badges de métricas com o comparativo direto entre Uniforme e K-Means."""
+        self._badge_tech.content.controls[1].value = "Uniforme × K-Means"
+        self._badge_gray_method.content.controls[1].value = method_label(self._selected_gray_method)
+        self._badge_mse.content.controls[1].value = f"U:{m_unif.mse:.1f} | K:{m_km.mse:.1f}"
+        self._badge_psnr.content.controls[1].value = f"U:{m_unif.psnr:.1f} | K:{m_km.psnr:.1f} dB"
         self._badge_levels.content.controls[1].value = f"{2 ** self._bits_value}"
         self._badge_time.content.controls[1].value = f"{elapsed:.2f}s"
+
+        best_tech = "K-Means" if m_km.psnr > m_unif.psnr else "Uniforme"
+        gain_psnr = abs(m_km.psnr - m_unif.psnr)
+        self._comp_metrics_box.content = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.AUTO_AWESOME, size=18, color=theme.PRIMARY_LIGHT),
+                    ft.Text(
+                        f"Comparativo: {best_tech} obteve maior fidelidade (+{gain_psnr:.2f} dB de PSNR).",
+                        size=theme.FONT_CAPTION,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border_radius=8,
+            padding=8,
+        )
+        self._comp_metrics_box.visible = True
+        self._btn_inspect.disabled = False
         self._page.update()
 
     def _reset_metrics(self) -> None:
         """Restaura os badges de métricas para o estado inicial."""
-        for badge in [self._badge_mse, self._badge_psnr, self._badge_levels, self._badge_time]:
-            badge.content.controls[1].value = "—"
+        self._badge_tech.content.controls[1].value = "—"
+        self._badge_gray_method.content.controls[1].value = "—"
+        self._badge_mse.content.controls[1].value = "—"
+        self._badge_psnr.content.controls[1].value = "—"
+        self._badge_levels.content.controls[1].value = "—"
+        self._badge_time.content.controls[1].value = "—"
+        self._comp_metrics_box.visible = False
+        self._btn_inspect.disabled = True
 
     def _show_message(self, message: str, color: str = theme.SUCCESS) -> None:
         """Exibe uma notificação ou SnackBar na tela."""
@@ -1615,4 +1566,25 @@ class SingleView(ft.Column):
         elif hasattr(self._page, "show_snack_bar"):
             self._page.show_snack_bar(snack)
         self._page.update()
+
+    def _open_inspector_dialog(self) -> None:
+        """Abre o modal didático 'Entranhas do Processo' com auditoria e raio-x do pipeline."""
+        if self._raw_image is None or self._gray_image is None or self._quantized_image is None:
+            self._show_message("Execute o processamento de uma imagem antes de inspecionar.", theme.WARNING)
+            return
+
+        gray_for_inspector = (
+            self._gray_image
+            if self._gray_image.ndim == 2
+            else to_grayscale(self._raw_image, self._selected_gray_method)
+        )
+        open_inspector_dialog(
+            page=self._page,
+            raw_image=self._raw_image,
+            gray_image=gray_for_inspector,
+            quantized_image=self._quantized_image,
+            bits=self._bits_value,
+            technique=self._selected_technique_key,
+            method=self._selected_gray_method,
+        )
 
