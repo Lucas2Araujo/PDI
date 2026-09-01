@@ -60,6 +60,12 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Configurar Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          cache: true
+
       - name: Instalar Dependências e Flet CLI
         run: |
           python -m pip install --upgrade pip
@@ -70,7 +76,7 @@ jobs:
         run: |
           REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
           echo "Compilando Flet Web para base-url: /${REPO_NAME}/"
-          flet build web --base-url "/${REPO_NAME}/" --route-url-strategy hash
+          flet build web --base-url "/${REPO_NAME}/" --route-url-strategy hash --yes
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
