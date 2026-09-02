@@ -664,7 +664,7 @@ class SingleView(ft.Column):
                     ),
                     ft.Segment(
                         value="triple",
-                        label=ft.Text(f"Grade Tripla (Original × RGB × Cinza • {t_short})", size=theme.FONT_CAPTION),
+                        label=ft.Text(f"Grade Tripla (Orig × {t_short} RGB × Cinza)", size=theme.FONT_CAPTION),
                         icon=ft.Icon(ft.Icons.VIEW_COLUMN),
                     ),
                     ft.Segment(
@@ -1426,15 +1426,13 @@ class SingleView(ft.Column):
 
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             # 1. Imagem Original de Entrada
-            if self._color_image_bytes is not None:
+            if self._color_image_bytes:
                 zf.writestr(f"1_original_{stem}_colorida_rgb.png", self._color_image_bytes)
-            elif self._input_image_bytes is not None:
+            elif self._input_image_bytes:
                 zf.writestr(f"1_original_{stem}.png", self._input_image_bytes)
-            elif self._raw_image is not None:
-                zf.writestr(f"1_original_{stem}.png", _ndarray_to_png_bytes(self._raw_image))
 
             # 2. Imagem Pré-Processada (Cinza ou Canal Isolado)
-            if self._convert_to_gray and self._gray_image_bytes is not None:
+            if self._convert_to_gray and self._gray_image_bytes:
                 if is_channel_isolation(self._selected_gray_method):
                     ch_name = get_channel_color_name(self._selected_gray_method).lower()
                     zf.writestr(f"2_pre_processamento_canal_{ch_name}.png", self._gray_image_bytes)
@@ -1444,11 +1442,11 @@ class SingleView(ft.Column):
 
             # 3. Imagens Quantizadas
             if self._selected_technique_key == "BOTH":
-                if self._direct_quantized_bytes is not None:
+                if self._direct_quantized_bytes:
                     zf.writestr(f"3_quantizada_uniforme_{self._bits_value}bits.png", self._direct_quantized_bytes)
-                if self._quantized_image_bytes is not None:
+                if self._quantized_image_bytes:
                     zf.writestr(f"4_quantizada_kmeans_{self._bits_value}bits.png", self._quantized_image_bytes)
-                if self._dither_image_bytes is not None:
+                if self._dither_image_bytes:
                     zf.writestr(f"5_quantizada_floyd_steinberg_{self._bits_value}bits.png", self._dither_image_bytes)
             else:
                 t_slug = (
@@ -1456,17 +1454,17 @@ class SingleView(ft.Column):
                     if isinstance(self._selected_technique_key, QuantizationTechnique)
                     else str(self._selected_technique_key).lower()
                 )
-                if self._direct_quantized_bytes is not None:
+                if self._direct_quantized_bytes:
                     zf.writestr(f"3_quantizada_{t_slug}_{self._bits_value}bits.png", self._direct_quantized_bytes)
-                if self._dither_image_bytes is not None and self._selected_technique_key != QuantizationTechnique.FLOYD_STEINBERG:
+                if self._dither_image_bytes and self._selected_technique_key != QuantizationTechnique.FLOYD_STEINBERG:
                     zf.writestr(f"4_quantizada_floyd_steinberg_{self._bits_value}bits.png", self._dither_image_bytes)
 
             # 4. Figuras Analíticas e Gráficos
-            if self._figure_bytes is not None:
+            if self._figure_bytes:
                 zf.writestr(f"painel_analitico_histogramas_{self._bits_value}bits.png", self._figure_bytes)
-            if self._color_figure_bytes is not None:
+            if self._color_figure_bytes:
                 zf.writestr(f"painel_analitico_colorido_{self._bits_value}bits.png", self._color_figure_bytes)
-            if self._dither_figure_bytes is not None:
+            if self._dither_figure_bytes:
                 zf.writestr(f"painel_comparativo_dithering_{self._bits_value}bits.png", self._dither_figure_bytes)
 
             # 5. Relatório Técnico Didático em TXT
@@ -1503,33 +1501,27 @@ class SingleView(ft.Column):
 
         if self._direct_metrics is not None:
             name_dir = "Quantização Uniforme" if self._selected_technique_key == "BOTH" else t_name
-            levels = getattr(self._direct_metrics, "unique_levels", getattr(self._direct_metrics, "num_levels", 2**self._bits_value))
             lines.append(f"[{name_dir}]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._direct_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._direct_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {levels}")
-            if hasattr(self._direct_metrics, "processing_time_ms"):
-                lines.append(f"  • Tempo de Processamento       : {self._direct_metrics.processing_time_ms:.1f} ms")
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._direct_metrics.num_levels}")
+            lines.append(f"  • Tempo de Processamento       : {self._direct_metrics.processing_time_ms:.1f} ms")
             lines.append("")
 
         if self._kmeans_metrics is not None:
-            levels = getattr(self._kmeans_metrics, "unique_levels", getattr(self._kmeans_metrics, "num_levels", 2**self._bits_value))
             lines.append("[Quantização Adaptativa K-Means]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._kmeans_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._kmeans_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {levels}")
-            if hasattr(self._kmeans_metrics, "processing_time_ms"):
-                lines.append(f"  • Tempo de Processamento       : {self._kmeans_metrics.processing_time_ms:.1f} ms")
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._kmeans_metrics.num_levels}")
+            lines.append(f"  • Tempo de Processamento       : {self._kmeans_metrics.processing_time_ms:.1f} ms")
             lines.append("")
 
         if self._dither_metrics is not None:
-            levels = getattr(self._dither_metrics, "unique_levels", getattr(self._dither_metrics, "num_levels", 2**self._bits_value))
             lines.append("[Aprimoramento com Floyd-Steinberg (Dithering)]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._dither_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._dither_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {levels}")
-            if hasattr(self._dither_metrics, "processing_time_ms"):
-                lines.append(f"  • Tempo de Processamento       : {self._dither_metrics.processing_time_ms:.1f} ms")
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._dither_metrics.num_levels}")
+            lines.append(f"  • Tempo de Processamento       : {self._dither_metrics.processing_time_ms:.1f} ms")
             lines.append("")
 
         lines.extend([
@@ -1547,7 +1539,7 @@ class SingleView(ft.Column):
 
     async def _on_download_all_zip(self, _: ft.ControlEvent | None = None) -> None:
         """Abre o FilePicker para salvar o pacote ZIP com todas as comparações geradas."""
-        if self._raw_image is None and self._loaded_array is None and not self._input_image_bytes:
+        if not self._raw_image and not self._loaded_array and not self._input_image_bytes:
             self._show_message("Execute o processamento de uma imagem antes de baixar o pacote.", theme.WARNING)
             return
 
