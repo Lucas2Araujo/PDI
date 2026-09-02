@@ -7,10 +7,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Permissão padrão mínima para todos os jobs (Princípio do Menor Privilégio)
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: "pages"
@@ -20,13 +19,15 @@ jobs:
   test:
     name: 🧪 Executar Suíte de Testes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout do Código
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Configurar Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -35,7 +36,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
 
       - name: Executar Testes Unitários e de Integração
         run: |
@@ -44,24 +44,28 @@ jobs:
   deploy-web:
     name: 🚀 Build & Deploy Web no GitHub Pages
     needs: test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout do Código
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Configurar Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Configurar Flutter SDK
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@f2c4f40b957c37147774944d187f58d411edfe36 # v2.18.0
         with:
           channel: "stable"
           cache: true
@@ -70,11 +74,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install flet-cli
+          pip install flet-cli>=0.23.0
 
       - name: Compilar Versão Web Estática do App
+        env:
+          REPO_CONTEXT: ${{ github.repository }}
         run: |
-          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          REPO_NAME=$(echo "$REPO_CONTEXT" | cut -d'/' -f2)
           echo "Compilando Flet Web para base-url: /${REPO_NAME}/"
           flet build web --base-url "/${REPO_NAME}/" --route-url-strategy hash --yes
 
@@ -101,13 +107,13 @@ jobs:
           ls -la build/web
 
       - name: Configurar GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7712d7b0a42eaf829e87129d164fa498fbdd # v5.0.0
 
       - name: Fazer Upload do Artefato Web
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: "build/web"
 
       - name: Publicar no GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

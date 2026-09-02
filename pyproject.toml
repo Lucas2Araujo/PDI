@@ -27,3 +27,12 @@ path = "."
 
 [tool.flet.web]
 route_url_strategy = "hash"
+
+[tool.pyright]
+extraPaths = ["."]
+include = [".", "src", "tests", "main.py"]
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

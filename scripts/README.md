@@ -9,7 +9,22 @@ Cada script é independente e pode ser executado diretamente via terminal.
 
 ## Scripts Disponíveis
 
-### `uniforme.py` — Quantização Uniforme
+### `dithering_floyd_steinberg.py` — Quantização com Dithering (Floyd-Steinberg)
+
+```bash
+python scripts/dithering_floyd_steinberg.py <caminho_da_imagem> <bits>
+```
+
+**Exemplo:**
+```bash
+python scripts/dithering_floyd_steinberg.py assets/lena_color.png 2
+```
+
+Gera: `lena_color_floyd_steinberg_2bits.png` e exibe relatório comparativo de **MSE** e **PSNR** com a quantização direta.
+
+---
+
+### `uniforme.py` — Quantização Uniforme (Centróides)
 
 ```bash
 python scripts/uniforme.py <caminho_da_imagem> <bits>
@@ -20,7 +35,7 @@ python scripts/uniforme.py <caminho_da_imagem> <bits>
 python scripts/uniforme.py teste.png 4
 ```
 
-Gera: `teste_uniforme_4bits.png`
+Gera: `teste_uniforme_4bits.png` — Reconstrução calculada no centróide ótimo de cada intervalo.
 
 ---
 

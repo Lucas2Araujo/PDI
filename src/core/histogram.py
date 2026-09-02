@@ -2,24 +2,21 @@
 histogram.py — Módulo de Histogramas e Métricas de Qualidade de Imagem.
 
 Responsável por:
-  - Calcular histogramas de frequência de intensidades.
-  - Gerar figuras comparativas (Original × Quantizada) com imagens e histogramas.
-  - Calcular métricas objetivas de qualidade de quantização: MSE e PSNR.
+  - Calcular histogramas numéricos de frequência de intensidades de forma ultra-rápida via NumPy.
+  - Calcular histogramas cromáticos RGB sobrepostos.
+  - Calcular métricas objetivas de fidelidade: MSE e PSNR.
+  - Gerar figuras legadas sob demanda (lazy loading do Matplotlib).
 
 Referências:
     - Gonzalez & Woods, "Digital Image Processing", Cap. 3 (Histogramas) e Cap. 8.
     - Salomon, D. "Data Compression" — PSNR como métrica de qualidade de imagem.
 """
 
-import io
 from dataclasses import dataclass
-
-import matplotlib
-import matplotlib.pyplot as plt
+import gc
+import io
+from typing import Any
 import numpy as np
-
-# Usa o backend não-interativo Agg para gerar figuras em memória (sem abrir janelas)
-matplotlib.use("Agg")
 
 
 # ---------------------------------------------------------------------------
@@ -34,10 +31,7 @@ class ImageMetrics:
 
     Attributes:
         mse: Mean Squared Error — erro médio quadrático por pixel.
-             Quanto menor, mais próximas as imagens são.
         psnr: Peak Signal-to-Noise Ratio em dB.
-              Quanto maior, melhor a qualidade preservada.
-              Valores típicos: >40 dB (excelente), 30–40 dB (boa), <30 dB (perceptível).
         unique_levels: Número de níveis de intensidade únicos na imagem quantizada.
         bits: Número de bits usado na quantização.
     """
@@ -63,19 +57,19 @@ class HistogramData:
 
 
 # ---------------------------------------------------------------------------
-# API Pública
+# API Pública de Cálculo Numérico
 # ---------------------------------------------------------------------------
 
 
 def compute_histogram(image: np.ndarray) -> HistogramData:
     """
-    Calcula o histograma de frequências de intensidade de uma imagem em escala de cinza ou canal único.
+    Calcula o histograma numérico de frequências de intensidade de uma imagem em escala de cinza ou canal único.
 
     Args:
         image: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
 
     Returns:
-        HistogramData com os arrays `counts` e `bin_edges`.
+        HistogramData com os arrays `counts` (256 bins) e `bin_edges` (257 bordas).
     """
     if image.ndim == 3:
         # Se for um canal isolado (ex: R ativo, G=0, B=0), detecta o canal com dados
@@ -89,9 +83,43 @@ def compute_histogram(image: np.ndarray) -> HistogramData:
     return HistogramData(counts=counts, bin_edges=bin_edges)
 
 
+def compute_rgb_histogram(image: np.ndarray) -> dict[str, HistogramData]:
+    """
+    Calcula os histogramas individuais para cada um dos canais R, G e B de uma imagem colorida.
+
+    Args:
+        image: Array NumPy (H, W, 3) ou (H, W, 4) ou (H, W).
+
+    Returns:
+        Dicionário com as chaves "R", "G", "B" contendo suas respectivas instâncias de HistogramData.
+    """
+    if image.ndim == 2:
+        h = compute_histogram(image)
+        return {"R": h, "G": h, "B": h}
+
+    rgb = image[:, :, :3]
+    if rgb.dtype != np.uint8 and np.issubdtype(rgb.dtype, np.floating):
+        rgb = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+
+    counts_r, bin_edges_r = np.histogram(rgb[:, :, 0].ravel(), bins=256, range=(0, 256))
+    counts_g, bin_edges_g = np.histogram(rgb[:, :, 1].ravel(), bins=256, range=(0, 256))
+    counts_b, bin_edges_b = np.histogram(rgb[:, :, 2].ravel(), bins=256, range=(0, 256))
+
+    return {
+        "R": HistogramData(counts=counts_r, bin_edges=bin_edges_r),
+        "G": HistogramData(counts=counts_g, bin_edges=bin_edges_g),
+        "B": HistogramData(counts=counts_b, bin_edges=bin_edges_b),
+    }
+
+
 def calculate_metrics(original: np.ndarray, quantized: np.ndarray, bits: int) -> ImageMetrics:
     """
-    Calcula as métricas objetivas de qualidade entre a imagem original e a quantizada.
+    Calcula as métricas objetivas de fidelidade (MSE e PSNR) entre a imagem original e a quantizada,
+    com suporte transparente para matrizes 2D (tons de cinza) e tensores 3D (RGB).
+
+    Fórmulas:
+        MSE = np.mean((orig.astype(np.float64) - quant.astype(np.float64)) ** 2)
+        PSNR = 10.0 * np.log10((255.0 ** 2) / MSE) if MSE > 0 else float("inf")
 
     Args:
         original: Array NumPy (H, W) ou (H, W, 3) uint8.
@@ -99,19 +127,30 @@ def calculate_metrics(original: np.ndarray, quantized: np.ndarray, bits: int) ->
         bits: Número de bits de quantização utilizado.
 
     Returns:
-        ImageMetrics com MSE, PSNR e contagem de níveis únicos.
+        ImageMetrics com MSE, PSNR e contagem de níveis / cores únicas.
     """
-    orig_2d = original if original.ndim == 2 else original[:, :, np.argmax([original[:, :, c].max() for c in range(3)])]
-    quant_2d = quantized if quantized.ndim == 2 else quantized[:, :, np.argmax([quantized[:, :, c].max() for c in range(3)])]
+    orig_f = original.astype(np.float64)
+    quant_f = quantized.astype(np.float64)
 
-    orig_float = orig_2d.astype(np.float64)
-    quant_float = quant_2d.astype(np.float64)
+    diff = orig_f - quant_f
+    mse = float(np.mean(diff ** 2))
+    psnr = float(10.0 * np.log10((255.0 ** 2) / mse)) if mse > 0.0 else float("inf")
 
-    mse = float(np.mean((orig_float - quant_float) ** 2))
-    psnr = _compute_psnr(mse)
-    unique_levels = int(np.unique(quant_2d).size)
+    if quantized.ndim == 3:
+        # Em imagens RGB, conta as combinações únicas de cores [R, G, B] na paleta final
+        unique_levels = int(len(np.unique(quantized.reshape(-1, 3), axis=0)))
+    else:
+        unique_levels = int(np.unique(quantized).size)
+
+    del orig_f, quant_f, diff
+    gc.collect()
 
     return ImageMetrics(mse=mse, psnr=psnr, unique_levels=unique_levels, bits=bits)
+
+
+# ---------------------------------------------------------------------------
+# Funções de Renderização Legadas (Matplotlib sob demanda)
+# ---------------------------------------------------------------------------
 
 
 def generate_comparison_figure(
@@ -123,51 +162,40 @@ def generate_comparison_figure(
     hist_color: str = "#4a90d9",
     orig_hist_color: str = "#555555",
 ) -> bytes:
-    """
-    Gera uma figura Matplotlib com a comparação lado a lado:
-      - Linha 1: Imagem Original | Imagem Quantizada
-      - Linha 2: Histograma Original | Histograma Quantizado
+    """Gera uma figura Matplotlib comparativa para exportação ou relatórios."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    A figura é renderizada em memória e retornada como bytes PNG,
-    compatível com exibição direta em interfaces Flet ou Web.
-
-    Args:
-        original: Array NumPy (H, W) ou (H, W, 3) uint8.
-        quantized: Array NumPy (H, W) ou (H, W, 3) uint8.
-        bits: Número de bits utilizado na quantização.
-        technique_name: Nome da técnica para o título da figura.
-        gray_method_name: Nome do método de escala de cinza (opcional).
-        hist_color: Cor hexadecimal da barra do histograma quantizado.
-        orig_hist_color: Cor hexadecimal da barra do histograma original.
-
-    Returns:
-        Bytes da figura no formato PNG.
-    """
     n_tons = 2 ** bits
-    hist_original = compute_histogram(original)
-    hist_quantized = compute_histogram(quantized)
+    is_rgb = bool(original.ndim == 3 and original.shape[2] >= 3)
+    info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
+    method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
 
-    method_str = f" | {gray_method_name}" if gray_method_name else ""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(
-        f"Comparação de Quantização — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
+        f"Comparação de Quantização — {technique_name}{method_str} {info_bits}",
         fontsize=14,
         fontweight="bold",
     )
 
-    # Linha 1 — Imagens
-    _plot_image(axes[0, 0], original, "Original (8 bits / 256 tons)")
-    _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
+    _plot_image(axes[0, 0], original, "Original (8 bits)")
+    _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n{info_bits}")
 
-    # Linha 2 — Histogramas
-    _plot_histogram(axes[1, 0], hist_original, "Histograma — Original (8 bits)", color=orig_hist_color)
-    _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color=hist_color)
+    if is_rgb:
+        _plot_rgb_histogram(axes[1, 0], original, "Histograma RGB — Original")
+        _plot_rgb_histogram(axes[1, 1], quantized, f"Histograma RGB — {technique_name}")
+    else:
+        hist_original = compute_histogram(original)
+        hist_quantized = compute_histogram(quantized)
+        _plot_histogram(axes[1, 0], hist_original, "Histograma — Original (8 bits)", color=orig_hist_color)
+        _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color=hist_color)
 
     plt.tight_layout()
-
     figure_bytes = _figure_to_bytes(fig)
     plt.close(fig)
-
+    del fig, axes
+    gc.collect()
     return figure_bytes
 
 
@@ -181,40 +209,45 @@ def generate_full_comparison_figure(
     hist_color_km: str = "#e8624a",
     orig_hist_color: str = "#555555",
 ) -> bytes:
-    """
-    Gera a figura completa de comparação das 3 imagens (Original, Uniforme, K-Means)
-    com seus respectivos histogramas em uma grade 2×3.
-    """
-    n_tons = 2 ** bits
-    hist_orig = compute_histogram(original)
-    hist_unif = compute_histogram(uniform)
-    hist_km = compute_histogram(kmeans)
+    """Gera a figura completa de comparação das 3 imagens (Original, Uniforme, K-Means)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    method_str = f" | {gray_method_name}" if gray_method_name else ""
+    n_tons = 2 ** bits
+    is_rgb = bool(original.ndim == 3 and original.shape[2] >= 3)
+    info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
+    method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
+
     fig, axes = plt.subplots(2, 3, figsize=(18, 8))
     fig.suptitle(
-        f"Comparação Completa (Uniforme × K-Means){method_str} — {bits} bits / {n_tons} tons",
+        f"Comparação Completa (Uniforme × K-Means){method_str} — {info_bits}",
         fontsize=14,
         fontweight="bold",
     )
 
-    # Linha 1 — Imagens
-    _plot_image(axes[0, 0], original, "Original (8 bits / 256 tons)")
-    _plot_image(axes[0, 1], uniform, f"Quantização Uniforme ({bits} bits)")
-    _plot_image(axes[0, 2], kmeans, f"Quantização Não-Uniforme K-Means ({bits} bits)")
+    _plot_image(axes[0, 0], original, "Original (8 bits)")
+    _plot_image(axes[0, 1], uniform, f"Quantização Uniforme {info_bits}")
+    _plot_image(axes[0, 2], kmeans, f"Quantização K-Means {info_bits}")
 
-    # Linha 2 — Histogramas
-    _plot_histogram(axes[1, 0], hist_orig, "Histograma — Original", color=orig_hist_color)
-    _plot_histogram(axes[1, 1], hist_unif, "Histograma — Uniforme", color=hist_color_unif)
-    _plot_histogram(axes[1, 2], hist_km, "Histograma — K-Means", color=hist_color_km)
+    if is_rgb:
+        _plot_rgb_histogram(axes[1, 0], original, "Histograma RGB — Original")
+        _plot_rgb_histogram(axes[1, 1], uniform, "Histograma RGB — Uniforme")
+        _plot_rgb_histogram(axes[1, 2], kmeans, "Histograma RGB — K-Means")
+    else:
+        hist_orig = compute_histogram(original)
+        hist_unif = compute_histogram(uniform)
+        hist_km = compute_histogram(kmeans)
+        _plot_histogram(axes[1, 0], hist_orig, "Histograma — Original", color=orig_hist_color)
+        _plot_histogram(axes[1, 1], hist_unif, "Histograma — Uniforme", color=hist_color_unif)
+        _plot_histogram(axes[1, 2], hist_km, "Histograma — K-Means", color=hist_color_km)
 
     plt.tight_layout()
-
     figure_bytes = _figure_to_bytes(fig)
     plt.close(fig)
-
+    del fig, axes
+    gc.collect()
     return figure_bytes
-
 
 
 def generate_color_comparison_figure(
@@ -225,77 +258,136 @@ def generate_color_comparison_figure(
     gray_image: np.ndarray | None = None,
     gray_method_name: str | None = None,
 ) -> bytes:
-    """
-    Gera uma figura comparativa destacando a imagem original colorida (RGB)
-    e o resultado quantizado em tons de cinza.
+    """Gera uma figura comparativa destacando a imagem original colorida (RGB)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    Se `gray_image` for fornecida, exibe uma grade 2×3 (Colorida, Cinza, Quantizada
-    e seus respectivos histogramas). Caso contrário, exibe uma grade 2×2
-    (Colorida vs Quantizada).
-    """
     n_tons = 2 ** bits
-    hist_quantized = compute_histogram(quantized)
+    is_quant_rgb = bool(quantized.ndim == 3 and quantized.shape[2] >= 3)
+    info_bits = f"({bits} bits / {(2**bits)**3 if is_quant_rgb else n_tons} tons)"
     method_str = f" | {gray_method_name}" if gray_method_name else ""
 
     if gray_image is not None:
         hist_gray = compute_histogram(gray_image)
         fig, axes = plt.subplots(2, 3, figsize=(18, 8))
         fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
+            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}",
             fontsize=14,
             fontweight="bold",
         )
 
-        # Linha 1: Imagens
         _plot_color_image(axes[0, 0], color_image, "1. Original Colorida (RGB)")
         _plot_image(axes[0, 1], gray_image, f"2. Escala de Cinza ({gray_method_name or '8 bits'})")
-        _plot_image(axes[0, 2], quantized, f"3. Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
+        _plot_image(axes[0, 2], quantized, f"3. Quantizada via {technique_name}\n{info_bits}")
 
-        # Linha 2: Histogramas
         _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
         _plot_histogram(axes[1, 1], hist_gray, "Histograma — Cinza", color="#555555")
-        _plot_histogram(axes[1, 2], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
+        if is_quant_rgb:
+            _plot_rgb_histogram(axes[1, 2], quantized, f"Histograma RGB — {technique_name}")
+        else:
+            hist_quantized = compute_histogram(quantized)
+            _plot_histogram(axes[1, 2], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
     else:
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} ({bits} bits / {n_tons} tons)",
+            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}",
             fontsize=14,
             fontweight="bold",
         )
 
         _plot_color_image(axes[0, 0], color_image, "Original Colorida (RGB)")
-        _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n({bits} bits / {n_tons} tons)")
+        _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n{info_bits}")
 
         _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
-        _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
+        if is_quant_rgb:
+            _plot_rgb_histogram(axes[1, 1], quantized, f"Histograma RGB — {technique_name}")
+        else:
+            hist_quantized = compute_histogram(quantized)
+            _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
 
     plt.tight_layout()
     figure_bytes = _figure_to_bytes(fig)
     plt.close(fig)
-
+    del fig, axes
+    gc.collect()
     return figure_bytes
 
 
+def generate_dither_comparison_figure(
+    original_gray: np.ndarray,
+    direct_quantized: np.ndarray,
+    dither_quantized: np.ndarray,
+    bits: int,
+    gray_method_name: str | None = None,
+    mse_direct: float | None = None,
+    psnr_direct: float | None = None,
+    mse_dither: float | None = None,
+    psnr_dither: float | None = None,
+) -> bytes:
+    """Gera uma figura comparativa destacando Quantização Direta vs Floyd-Steinberg."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_tons = 2 ** bits
+    is_rgb = bool(original_gray.ndim == 3 and original_gray.shape[2] >= 3)
+    info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
+    method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
+    fig.suptitle(
+        f"Comparativo de Pós-Processamento: Direta vs Floyd-Steinberg{method_str} — {info_bits}",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    t_dir = f"2. Quantização Direta {info_bits}"
+    if mse_direct is not None and psnr_direct is not None:
+        t_dir += f"\nMSE: {mse_direct:.1f} | PSNR: {psnr_direct:.1f} dB"
+
+    t_dit = f"3. Com Floyd-Steinberg {info_bits}"
+    if mse_dither is not None and psnr_dither is not None:
+        t_dit += f"\nMSE: {mse_dither:.1f} | PSNR: {psnr_dither:.1f} dB"
+
+    _plot_image(axes[0, 0], original_gray, "1. Entrada Original (8 bits)")
+    _plot_image(axes[0, 1], direct_quantized, t_dir)
+    _plot_image(axes[0, 2], dither_quantized, t_dit)
+
+    if is_rgb:
+        _plot_rgb_histogram(axes[1, 0], original_gray, "Histograma RGB — Entrada")
+        _plot_rgb_histogram(axes[1, 1], direct_quantized, "Histograma RGB — Direta")
+        _plot_rgb_histogram(axes[1, 2], dither_quantized, "Histograma RGB — Floyd-Steinberg")
+    else:
+        hist_orig = compute_histogram(original_gray)
+        hist_dir = compute_histogram(direct_quantized)
+        hist_dit = compute_histogram(dither_quantized)
+        _plot_histogram(axes[1, 0], hist_orig, "Histograma — Entrada Original", color="#555555")
+        _plot_histogram(axes[1, 1], hist_dir, "Histograma — Quantização Direta", color="#4a90d9")
+        _plot_histogram(axes[1, 2], hist_dit, "Histograma — Com Floyd-Steinberg", color="#e8624a")
+
+    plt.tight_layout()
+    figure_bytes = _figure_to_bytes(fig)
+    plt.close(fig)
+    del fig, axes
+    gc.collect()
+    return figure_bytes
+
+
+
 # ---------------------------------------------------------------------------
-# Funções Privadas de Renderização
+# Funções Auxiliares Privadas
 # ---------------------------------------------------------------------------
 
 
 def _compute_psnr(mse: float, max_value: float = 255.0) -> float:
-    """
-    Calcula o PSNR (Peak Signal-to-Noise Ratio) em decibéis.
-
-    PSNR = 20 · log10(MAX) − 10 · log10(MSE)
-
-    Retorna `inf` quando MSE = 0 (imagens idênticas).
-    """
+    """Calcula o PSNR (Peak Signal-to-Noise Ratio) em dB."""
     if mse == 0.0:
         return float("inf")
-    return 20.0 * np.log10(max_value) - 10.0 * np.log10(mse)
+    return float(20.0 * np.log10(max_value) - 10.0 * np.log10(mse))
 
 
-def _plot_image(ax: plt.Axes, image: np.ndarray, title: str) -> None:
-    """Renderiza uma imagem em escala de cinza ou canal colorido isolado em um eixo Matplotlib."""
+def _plot_image(ax: Any, image: np.ndarray, title: str) -> None:
     if image.ndim == 2:
         ax.imshow(image, cmap="gray", vmin=0, vmax=255)
     else:
@@ -307,23 +399,16 @@ def _plot_image(ax: plt.Axes, image: np.ndarray, title: str) -> None:
     ax.axis("off")
 
 
-
-def _plot_color_image(ax: plt.Axes, image: np.ndarray, title: str) -> None:
-    """Renderiza uma imagem colorida (RGB/RGBA) em um eixo Matplotlib."""
-    if image.ndim == 2:
-        ax.imshow(image, cmap="gray", vmin=0, vmax=255)
-    else:
-        # Se for RGBA ou tiver canais float/uint8
-        img_display = image[:, :, :3] if image.shape[2] >= 3 else image
-        if img_display.dtype != np.uint8 and np.issubdtype(img_display.dtype, np.floating):
-            img_display = np.clip(img_display, 0.0, 1.0)
-        ax.imshow(img_display)
+def _plot_color_image(ax: Any, image: np.ndarray, title: str) -> None:
+    img_display = image[:, :, :3] if image.ndim == 3 and image.shape[2] >= 3 else image
+    if img_display.dtype != np.uint8 and np.issubdtype(img_display.dtype, np.floating):
+        img_display = np.clip(img_display, 0.0, 1.0)
+    ax.imshow(img_display)
     ax.set_title(title, fontsize=11)
     ax.axis("off")
 
 
-def _plot_histogram(ax: plt.Axes, hist: HistogramData, title: str, color: str) -> None:
-    """Plota o histograma de frequências em um eixo Matplotlib."""
+def _plot_histogram(ax: Any, hist: HistogramData, title: str, color: str) -> None:
     ax.bar(
         hist.bin_edges[:-1],
         hist.counts,
@@ -335,11 +420,9 @@ def _plot_histogram(ax: plt.Axes, hist: HistogramData, title: str, color: str) -
     ax.set_xlim([0, 256])
     ax.set_xlabel("Intensidade")
     ax.set_ylabel("Frequência (Pixels)")
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x):,}"))
 
 
-def _plot_rgb_histogram(ax: plt.Axes, image: np.ndarray, title: str) -> None:
-    """Plota histogramas sobrepostos para os canais R, G e B."""
+def _plot_rgb_histogram(ax: Any, image: np.ndarray, title: str) -> None:
     if image.ndim == 2:
         hist = compute_histogram(image)
         _plot_histogram(ax, hist, title, color="#555555")
@@ -360,14 +443,10 @@ def _plot_rgb_histogram(ax: plt.Axes, image: np.ndarray, title: str) -> None:
     ax.set_xlabel("Intensidade (0–255)")
     ax.set_ylabel("Frequência")
     ax.legend(loc="upper right", fontsize=9)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x):,}"))
 
 
-def _figure_to_bytes(fig: plt.Figure) -> bytes:
-    """Renderiza uma figura Matplotlib em um buffer de bytes no formato PNG."""
+def _figure_to_bytes(fig: Any) -> bytes:
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
     buffer.seek(0)
     return buffer.read()
-
-

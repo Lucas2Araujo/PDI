@@ -5,22 +5,19 @@ Extrai telemetria detalhada de cada etapa do processamento:
   1. Matriz de entrada original e amostras numéricas.
   2. Aritmética passo a passo da conversão para escala de cinza/canal.
   3. Mecânica interna da quantização (tabela de decisão, centróides e quantis).
-  4. Auditoria de erro com matriz residual, métricas e mapa de calor (Heatmap).
+  4. Auditoria de erro com matriz residual, métricas e mapa térmico (Heatmap) gerado em puro NumPy.
 """
 
 from dataclasses import dataclass, field
+import gc
 import io
 from typing import Any
 
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
-
-matplotlib.use("Agg")
+from PIL import Image
 
 from src.core.grayscale import (
     GrayscaleMethod,
-    _LUMINANCE_WEIGHTS,
     get_channel_index,
     is_channel_isolation,
     method_label,
@@ -88,6 +85,112 @@ class PipelineTelemetry:
     heatmap_bytes: bytes
 
 
+def _format_pixel_calc(
+    abs_r: int,
+    abs_c: int,
+    raw_pixel: np.ndarray | None,
+    gray_val: int,
+    is_color: bool,
+    method: GrayscaleMethod,
+) -> str:
+    """Formata a equação passo a passo para um único pixel."""
+    if not is_color or raw_pixel is None:
+        return f"Pixel({abs_r},{abs_c}): Valor já monocromático = {gray_val}"
+
+    r_val = int(raw_pixel[0])
+    g_val = int(raw_pixel[1])
+    b_val = int(raw_pixel[2])
+
+    if method == GrayscaleMethod.LUMINANCE:
+        y_calc = round(0.2989 * r_val + 0.5870 * g_val + 0.1140 * b_val)
+        return f"Pixel({abs_r},{abs_c}): 0.2989×{r_val} + 0.5870×{g_val} + 0.1140×{b_val} = {y_calc} (Cinza: {gray_val})"
+    if method == GrayscaleMethod.AVERAGE:
+        y_calc = round((r_val + g_val + b_val) / 3.0)
+        return f"Pixel({abs_r},{abs_c}): ({r_val} + {g_val} + {b_val}) / 3 = {y_calc} (Cinza: {gray_val})"
+    if method == GrayscaleMethod.CHANNEL_R:
+        return f"Pixel({abs_r},{abs_c}): Canal R isolado = {r_val}"
+    if method == GrayscaleMethod.CHANNEL_G:
+        return f"Pixel({abs_r},{abs_c}): Canal G isolado = {g_val}"
+    if method == GrayscaleMethod.CHANNEL_B:
+        return f"Pixel({abs_r},{abs_c}): Canal B isolado = {b_val}"
+
+    return f"Pixel({abs_r},{abs_c}): Valor = {gray_val}"
+
+
+def _build_pixel_calculations(
+    sample_raw: np.ndarray,
+    sample_gray: np.ndarray,
+    start_r: int,
+    start_c: int,
+    is_color: bool,
+    method: GrayscaleMethod,
+) -> list[str]:
+    """Gera a lista de strings com equações aritméticas para os pixels da amostra."""
+    calcs: list[str] = []
+    r_rows, r_cols = sample_gray.shape
+    for i in range(r_rows):
+        for j in range(r_cols):
+            abs_r = start_r + i
+            abs_c = start_c + j
+            raw_p = sample_raw[i, j] if is_color else None
+            calcs.append(
+                _format_pixel_calc(
+                    abs_r=abs_r,
+                    abs_c=abs_c,
+                    raw_pixel=raw_p,
+                    gray_val=int(sample_gray[i, j]),
+                    is_color=is_color,
+                    method=method,
+                )
+            )
+    return calcs
+
+
+def _build_uniform_quant_table(
+    gray_image: np.ndarray,
+    n_levels: int,
+    step_size: float,
+) -> list[dict[str, Any]]:
+    """Gera linhas da tabela de quantização para a técnica uniforme."""
+    rows: list[dict[str, Any]] = []
+    total = gray_image.size
+    for idx in range(n_levels):
+        low = int(idx * step_size)
+        high = 255 if idx == n_levels - 1 else int((idx + 1) * step_size - 1)
+        reconstruction = int(np.clip((idx + 0.5) * step_size, 0, 255))
+        count = int(np.sum((gray_image >= low) & (gray_image <= high)))
+        pct = (count / total) * 100.0 if total > 0 else 0.0
+        rows.append({
+            "index": idx,
+            "range": f"[{low:03d} – {high:03d}]",
+            "reconstruction": reconstruction,
+            "count": count,
+            "pct": f"{pct:.1f}%",
+        })
+    return rows
+
+
+def _build_discrete_quant_table(
+    q_2d: np.ndarray,
+    total_pixels: int,
+    label_prefix: str,
+) -> list[dict[str, Any]]:
+    """Gera linhas da tabela para técnicas discretas (KMeans, Dither, Histograma)."""
+    rows: list[dict[str, Any]] = []
+    unique_vals = np.sort(np.unique(q_2d))
+    for idx, val in enumerate(unique_vals):
+        count = int(np.sum(q_2d == val))
+        pct = (count / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+        rows.append({
+            "index": idx,
+            "range": f"{label_prefix} {idx + 1}",
+            "reconstruction": int(val),
+            "count": count,
+            "pct": f"{pct:.1f}%",
+        })
+    return rows
+
+
 def extract_pipeline_telemetry(
     raw_image: np.ndarray,
     gray_image: np.ndarray,
@@ -124,94 +227,53 @@ def extract_pipeline_telemetry(
     sample_raw = raw_image[start_r:end_r, start_c:end_c]
     sample_gray = gray_image[start_r:end_r, start_c:end_c]
 
-    # Assegura que imagem quantizada 2D é usada para cálculo de erro escalar
-    if quantized_image.ndim == 3:
-        if is_channel_isolation(method):
-            ch_idx = get_channel_index(method) or 0
-            q_2d = quantized_image[:, :, ch_idx]
-        else:
-            q_2d = quantized_image[:, :, 0]
+    # Assegura que imagem quantizada 2D é usada para cálculo de erro escalar ou 3D
+    if gray_image.ndim == 3:
+        sample_quant = quantized_image[start_r:end_r, start_c:end_c]
+        diff_samp = sample_gray.astype(np.float32) - sample_quant.astype(np.float32)
+        sample_error = np.clip(np.mean(np.abs(diff_samp), axis=2), 0, 255).astype(np.uint8)
+        diff = gray_image.astype(np.float64) - quantized_image.astype(np.float64)
+        abs_error_map = np.clip(np.mean(np.abs(diff), axis=2), 0, 255).astype(np.uint8)
     else:
-        q_2d = quantized_image
+        if quantized_image.ndim == 3:
+            if is_channel_isolation(method):
+                ch_idx = get_channel_index(method) or 0
+                q_2d = quantized_image[:, :, ch_idx]
+            else:
+                q_2d = quantized_image[:, :, 0]
+        else:
+            q_2d = quantized_image
 
-    sample_quant = q_2d[start_r:end_r, start_c:end_c]
-    sample_error = np.abs(sample_gray.astype(np.int32) - sample_quant.astype(np.int32)).astype(np.uint8)
+        sample_quant = q_2d[start_r:end_r, start_c:end_c]
+        sample_error = np.abs(sample_gray.astype(np.int32) - sample_quant.astype(np.int32)).astype(np.uint8)
+        diff = gray_image.astype(np.float64) - q_2d.astype(np.float64)
+        abs_error_map = np.abs(diff).astype(np.uint8)
 
     # 2. Cálculos Aritméticos Passo a Passo da Conversão Cinza
-    pixel_calcs: list[str] = []
-    r_rows, r_cols = sample_gray.shape
-    for i in range(r_rows):
-        for j in range(r_cols):
-            abs_r = start_r + i
-            abs_c = start_c + j
-            if is_color:
-                r_val = int(sample_raw[i, j, 0])
-                g_val = int(sample_raw[i, j, 1])
-                b_val = int(sample_raw[i, j, 2])
-                if method == GrayscaleMethod.LUMINANCE:
-                    y_calc = round(0.2989 * r_val + 0.5870 * g_val + 0.1140 * b_val)
-                    pixel_calcs.append(
-                        f"Pixel({abs_r},{abs_c}): 0.2989×{r_val} + 0.5870×{g_val} + 0.1140×{b_val} = {y_calc} (Cinza: {sample_gray[i, j]})"
-                    )
-                elif method == GrayscaleMethod.AVERAGE:
-                    y_calc = round((r_val + g_val + b_val) / 3.0)
-                    pixel_calcs.append(
-                        f"Pixel({abs_r},{abs_c}): ({r_val} + {g_val} + {b_val}) / 3 = {y_calc} (Cinza: {sample_gray[i, j]})"
-                    )
-                elif method == GrayscaleMethod.CHANNEL_R:
-                    pixel_calcs.append(f"Pixel({abs_r},{abs_c}): Canal R isolado = {r_val}")
-                elif method == GrayscaleMethod.CHANNEL_G:
-                    pixel_calcs.append(f"Pixel({abs_r},{abs_c}): Canal G isolado = {g_val}")
-                elif method == GrayscaleMethod.CHANNEL_B:
-                    pixel_calcs.append(f"Pixel({abs_r},{abs_c}): Canal B isolado = {b_val}")
-            else:
-                pixel_calcs.append(f"Pixel({abs_r},{abs_c}): Valor já monocromático = {sample_gray[i, j]}")
+    pixel_calcs = _build_pixel_calculations(
+        sample_raw=sample_raw,
+        sample_gray=sample_gray,
+        start_r=start_r,
+        start_c=start_c,
+        is_color=is_color,
+        method=method,
+    )
 
     # 3. Mecânica de Quantização
     tech_name = technique_label(technique) if isinstance(technique, QuantizationTechnique) else str(technique)
     table_rows: list[dict[str, Any]] = []
-    step_size = None
+    step_size: float | None = None
 
-    if technique == QuantizationTechnique.UNIFORM or technique == "BOTH":
-        step_size = 256 // n_levels
-        scale_factor = 255 // (n_levels - 1) if n_levels > 1 else 0
-        for idx in range(n_levels):
-            low = idx * step_size
-            high = 255 if idx == n_levels - 1 else ((idx + 1) * step_size - 1)
-            reconstruction = idx * scale_factor
-            count = int(np.sum((gray_image >= low) & (gray_image <= high)))
-            pct = (count / gray_image.size) * 100.0
-            table_rows.append({
-                "index": idx,
-                "range": f"[{low:03d} – {high:03d}]",
-                "reconstruction": reconstruction,
-                "count": count,
-                "pct": f"{pct:.1f}%",
-            })
+    if technique in (QuantizationTechnique.UNIFORM, "BOTH"):
+        step_size = 256.0 / n_levels
+        table_rows = _build_uniform_quant_table(gray_image if gray_image.ndim == 2 else gray_image[:, :, 0], n_levels, step_size)
+    elif technique == QuantizationTechnique.FLOYD_STEINBERG:
+        step_size = 255.0 / (n_levels - 1) if n_levels > 1 else 255.0
+        table_rows = _build_discrete_quant_table(quantized_image if quantized_image.ndim == 2 else quantized_image[:, :, 0], gray_image.size, "Nível Dither")
     elif technique == QuantizationTechnique.KMEANS:
-        unique_centroids = np.sort(np.unique(q_2d))
-        for idx, cent in enumerate(unique_centroids):
-            count = int(np.sum(q_2d == cent))
-            pct = (count / gray_image.size) * 100.0
-            table_rows.append({
-                "index": idx,
-                "range": f"Cluster {idx + 1}",
-                "reconstruction": int(cent),
-                "count": count,
-                "pct": f"{pct:.1f}%",
-            })
+        table_rows = _build_discrete_quant_table(quantized_image if quantized_image.ndim == 2 else quantized_image[:, :, 0], gray_image.size, "Cluster")
     elif technique == QuantizationTechnique.HISTOGRAM:
-        unique_vals = np.sort(np.unique(q_2d))
-        for idx, val in enumerate(unique_vals):
-            count = int(np.sum(q_2d == val))
-            pct = (count / gray_image.size) * 100.0
-            table_rows.append({
-                "index": idx,
-                "range": f"Faixa Quantil {idx + 1}",
-                "reconstruction": int(val),
-                "count": count,
-                "pct": f"{pct:.1f}%",
-            })
+        table_rows = _build_discrete_quant_table(quantized_image if quantized_image.ndim == 2 else quantized_image[:, :, 0], gray_image.size, "Faixa Quantil")
 
     quant_info = QuantizationStepInfo(
         technique_name=tech_name,
@@ -222,19 +284,20 @@ def extract_pipeline_telemetry(
     )
 
     # 4. Métricas e Auditoria de Erro Residual
-    diff = gray_image.astype(np.float64) - q_2d.astype(np.float64)
     mse = float(np.mean(diff ** 2))
     psnr = float(10.0 * np.log10((255.0 ** 2) / mse)) if mse > 1e-10 else float("inf")
-    abs_error_map = np.abs(diff).astype(np.uint8)
-    max_error = int(np.max(abs_error_map))
-    mean_error = float(np.mean(abs_error_map))
+    max_error = int(np.max(abs_error_map)) if abs_error_map.size > 0 else 0
+    mean_error = float(np.mean(abs_error_map)) if abs_error_map.size > 0 else 0.0
 
     orig_bpp = 24 if is_color else 8
     quant_bpp = bits
     savings_pct = (1.0 - (quant_bpp / orig_bpp)) * 100.0
 
-    # 5. Geração do Mapa de Calor de Erro Residual (Heatmap)
-    heatmap_bytes = _generate_heatmap_figure(gray_image, q_2d, abs_error_map, bits, tech_name, mse, psnr)
+    # 5. Geração ultra-rápida do Mapa Térmico de Erro Residual via NumPy LUT
+    heatmap_bytes = _generate_heatmap_bytes(abs_error_map)
+
+    del diff
+    gc.collect()
 
     return PipelineTelemetry(
         image_shape=raw_image.shape,
@@ -261,44 +324,30 @@ def extract_pipeline_telemetry(
     )
 
 
-def _generate_heatmap_figure(
-    gray_image: np.ndarray,
-    quantized_image: np.ndarray,
-    error_map: np.ndarray,
-    bits: int,
-    tech_name: str,
-    mse: float,
-    psnr: float,
-) -> bytes:
-    """Gera a figura Matplotlib com a comparação da imagem e o mapa térmico de erro residual."""
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.suptitle(
-        f"Auditoria Didática do Erro Residual — {tech_name} ({bits} bits)\nMSE: {mse:.2f} · PSNR: {psnr:.2f} dB",
-        fontsize=13,
-        fontweight="bold",
-    )
+def _generate_heatmap_bytes(error_map: np.ndarray) -> bytes:
+    """
+    Gera a figura PNG do mapa térmico de erro residual usando uma LUT de cores inferno
+    em puro NumPy e Pillow, sem qualquer dependência ou overhead do Matplotlib.
+    """
+    max_val = int(np.max(error_map)) if error_map.size > 0 else 0
+    if max_val == 0:
+        norm = np.zeros_like(error_map, dtype=np.uint8)
+    else:
+        norm = ((error_map.astype(np.float32) / max_val) * 255.0).astype(np.uint8)
 
-    # Painel 1: Imagem Tons de Cinza Original
-    axes[0].imshow(gray_image, cmap="gray", vmin=0, vmax=255)
-    axes[0].set_title("1. Entrada (8 bits / 256 tons)", fontsize=11, fontweight="bold")
-    axes[0].axis("off")
+    # 256 RGB colors aproximando o mapa térmico inferno (escuro/roxo -> vermelho -> amarelo -> branco)
+    t = np.linspace(0, 1, 256, dtype=np.float32)
+    r = np.clip(np.sin(t * np.pi * 0.9) * 1.5 - 0.2 + (t > 0.6) * (t - 0.6) * 2.5, 0.0, 1.0)
+    g = np.clip((t - 0.2) * 1.2 * (t > 0.2) + (t > 0.7) * (t - 0.7) * 2.0, 0.0, 1.0)
+    b = np.clip(np.sin(t * np.pi) * 0.8 * (t < 0.6) + (t > 0.85) * (t - 0.85) * 4.0, 0.0, 1.0)
+    lut = (np.column_stack([r, g, b]) * 255.0).astype(np.uint8)
 
-    # Painel 2: Imagem Quantizada
-    axes[1].imshow(quantized_image, cmap="gray", vmin=0, vmax=255)
-    axes[1].set_title(f"2. Quantizada ({bits} bits / {2**bits} tons)", fontsize=11, fontweight="bold")
-    axes[1].axis("off")
-
-    # Painel 3: Mapa de Calor do Erro Residual
-    im_err = axes[2].imshow(error_map, cmap="inferno", vmin=0, vmax=max(1, int(np.max(error_map))))
-    axes[2].set_title("3. Mapa de Calor do Erro |I - Q|\n(Amarelo/Branco = Maior Perda)", fontsize=11, fontweight="bold", color="#d32f2f")
-    axes[2].axis("off")
-
-    cbar = fig.colorbar(im_err, ax=axes[2], fraction=0.046, pad=0.04)
-    cbar.set_label("Erro Absoluto (Intensidade)", fontsize=9)
-
-    plt.tight_layout()
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return buffer.getvalue()
-
+    colored_heatmap = lut[norm]
+    pil_img = Image.fromarray(colored_heatmap, mode="RGB")
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    result = buf.getvalue()
+    buf.close()
+    pil_img.close()
+    del norm, lut, colored_heatmap
+    return result

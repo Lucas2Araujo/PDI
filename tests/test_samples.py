@@ -2,7 +2,9 @@
 test_samples.py — Testes unitários do módulo de imagens de exemplo embutidas.
 """
 
+import os
 import unittest
+from unittest.mock import patch
 import numpy as np
 
 from src.core.samples import (
@@ -56,10 +58,12 @@ class TestSamples(unittest.TestCase):
         self.assertEqual(arr_lena.shape, (512, 512, 3))
 
         arr_ayla = load_sample_array(SAMPLE_AYLA_NAME)
-        self.assertEqual(arr_ayla.shape, (1600, 1494, 3))
+        self.assertLessEqual(max(arr_ayla.shape[:2]), 800)
+        self.assertEqual(arr_ayla.ndim, 3)
 
         arr_pent = load_sample_array(SAMPLE_PENTAGONO_NAME)
-        self.assertEqual(arr_pent.shape, (1024, 1024))
+        self.assertLessEqual(max(arr_pent.shape[:2]), 800)
+        self.assertEqual(arr_pent.ndim, 2)
 
     def test_load_sample_bytes(self) -> None:
         for opt in SAMPLE_OPTIONS:
@@ -67,23 +71,16 @@ class TestSamples(unittest.TestCase):
             self.assertTrue(b.startswith(self.PNG_MAGIC), f"Header PNG inválido para {opt['name']}")
 
     def test_assets_dir_fallback_and_environment(self) -> None:
-        import os
         from src.core.samples import _find_assets_dir, ASSETS_DIR
         self.assertTrue(ASSETS_DIR.exists())
         self.assertTrue((ASSETS_DIR / SAMPLE_PORTRAIT_NAME).exists())
 
-        # Teste com FLET_ASSETS_DIR definido
-        old_env = os.environ.get("FLET_ASSETS_DIR")
-        try:
-            os.environ["FLET_ASSETS_DIR"] = str(ASSETS_DIR)
+        # Teste com FLET_ASSETS_DIR definido de forma segura com patch.dict
+        with patch.dict(os.environ, {"FLET_ASSETS_DIR": str(ASSETS_DIR)}):
             resolved = _find_assets_dir()
             self.assertEqual(resolved, ASSETS_DIR)
-        finally:
-            if old_env is not None:
-                os.environ["FLET_ASSETS_DIR"] = old_env
-            else:
-                os.environ.pop("FLET_ASSETS_DIR", None)
 
 
 if __name__ == "__main__":
     unittest.main()
+

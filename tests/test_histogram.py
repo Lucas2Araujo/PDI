@@ -11,6 +11,7 @@ from src.core.histogram import (
     compute_histogram,
     generate_color_comparison_figure,
     generate_comparison_figure,
+    generate_dither_comparison_figure,
     generate_full_comparison_figure,
 )
 
@@ -32,6 +33,17 @@ class TestComputeHistogram(unittest.TestCase):
         self.assertEqual(int(np.sum(hist.counts)), 100)
         self.assertEqual(int(np.sum(hist.counts == 0)), 255)
 
+    def test_compute_rgb_histogram(self) -> None:
+        from src.core.histogram import compute_rgb_histogram
+        img = np.random.randint(0, 256, (20, 20, 3), dtype=np.uint8)
+        hists = compute_rgb_histogram(img)
+        self.assertIn("R", hists)
+        self.assertIn("G", hists)
+        self.assertIn("B", hists)
+        self.assertEqual(int(np.sum(hists["R"].counts)), 400)
+        self.assertEqual(int(np.sum(hists["G"].counts)), 400)
+        self.assertEqual(int(np.sum(hists["B"].counts)), 400)
+
 
 class TestCalculateMetrics(unittest.TestCase):
     """Suíte de testes para cálculo de MSE, PSNR e níveis únicos."""
@@ -44,7 +56,7 @@ class TestCalculateMetrics(unittest.TestCase):
         self.assertEqual(metrics.unique_levels, 100)
         self.assertEqual(metrics.bits, 8)
 
-    def test_known_difference(self) -> None:
+    def test_known_difference_2d(self) -> None:
         orig = np.zeros((10, 10), dtype=np.uint8)
         quant = np.full((10, 10), 10, dtype=np.uint8)
         metrics = calculate_metrics(orig, quant, bits=4)
@@ -52,6 +64,16 @@ class TestCalculateMetrics(unittest.TestCase):
         # MSE = 10^2 = 100.0
         self.assertAlmostEqual(metrics.mse, 100.0, places=4)
         # PSNR = 20 * log10(255) - 10 * log10(100) = 48.1308 - 20 = 28.1308 dB
+        expected_psnr = 20.0 * math.log10(255.0) - 10.0 * math.log10(100.0)
+        self.assertAlmostEqual(metrics.psnr, expected_psnr, places=4)
+        self.assertEqual(metrics.unique_levels, 1)
+
+    def test_known_difference_3d_rgb(self) -> None:
+        orig = np.zeros((10, 10, 3), dtype=np.uint8)
+        quant = np.full((10, 10, 3), 10, dtype=np.uint8)
+        metrics = calculate_metrics(orig, quant, bits=4)
+
+        self.assertAlmostEqual(metrics.mse, 100.0, places=4)
         expected_psnr = 20.0 * math.log10(255.0) - 10.0 * math.log10(100.0)
         self.assertAlmostEqual(metrics.psnr, expected_psnr, places=4)
         self.assertEqual(metrics.unique_levels, 1)
@@ -110,6 +132,21 @@ class TestGenerateFigures(unittest.TestCase):
         self.assertIsInstance(fig_bytes_2, bytes)
         self.assertTrue(fig_bytes_2.startswith(self.PNG_MAGIC))
 
+    def test_generate_dither_comparison_figure(self) -> None:
+        fig_bytes = generate_dither_comparison_figure(
+            original_gray=self.orig,
+            direct_quantized=self.quant1,
+            dither_quantized=self.quant2,
+            bits=4,
+            mse_direct=12.5,
+            psnr_direct=37.1,
+            mse_dither=10.2,
+            psnr_dither=38.0,
+        )
+        self.assertIsInstance(fig_bytes, bytes)
+        self.assertTrue(fig_bytes.startswith(self.PNG_MAGIC))
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,5 +1,5 @@
 """
-uniforme.py — Script CLI para Quantização Uniforme de Imagem.
+uniforme.py — Script CLI para Quantização Uniforme de Imagem (Reconstrução por Centróides).
 
 Uso:
     python scripts/uniforme.py <caminho_da_imagem> <bits>
@@ -8,7 +8,9 @@ Exemplo:
     python scripts/uniforme.py imagem.png 4
 
 Técnica:
-    Quantização Uniforme — divide o intervalo [0, 255] em 2^bits intervalos iguais.
+    Quantização Uniforme com Centróides — divide o espaço de intensidades [0, 255]
+    em 2^bits intervalos iguais e reconstrói cada partição em seu ponto médio:
+    reconstrucao[i] = clip((i + 0.5) * passo, 0, 255).
 """
 
 import sys
@@ -20,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from skimage import io
 
 from src.core.grayscale import GrayscaleMethod, to_grayscale
+from src.core.histogram import calculate_metrics
 from src.core.quantization import QuantizationTechnique, quantize, technique_label
 
 
@@ -48,11 +51,15 @@ def main(image_path: str, bits: int) -> None:
     print(f"\nAplicando {technique_label(QuantizationTechnique.UNIFORM)} ({bits} bits / {n_tons} tons)...")
     quantized = quantize(gray, bits=bits, technique=QuantizationTechnique.UNIFORM)
 
+    metrics = calculate_metrics(gray, quantized, bits)
+
     output_path = source.parent / f"{source.stem}_uniforme_{bits}bits.png"
     io.imsave(str(output_path), quantized)
 
     print(f"\nImagem salva em : {output_path}")
-    print(f"  Níveis únicos  : {len(set(quantized.ravel()))}")
+    print(f"  MSE            : {metrics.mse:.4f}")
+    print(f"  PSNR           : {metrics.psnr:.2f} dB")
+    print(f"  Níveis únicos  : {metrics.unique_levels}")
     print(f"  Mín / Máx      : {quantized.min()} / {quantized.max()}")
 
 

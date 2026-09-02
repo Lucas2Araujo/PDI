@@ -1,48 +1,60 @@
+"""
+QuantizaNunifor.py — Script para Quantização Não-Uniforme (K-Means).
+"""
+
+import sys
+from pathlib import Path
+
 import numpy as np
-import skimage as ski 
-from skimage import io, color, util
+from skimage import color, io, util
 from sklearn.cluster import KMeans
 
-imagem_rgb = io.imread("teste.png")
-imagem_Tcinza = color.rgb2gray(imagem_rgb)
 
-print("Formato da imagem RGB é : ", imagem_rgb.shape)
-print("Tipo de dado da imagem RGB : ", imagem_rgb.dtype)
-print("Formato da imagem em tons de cinza é : ", imagem_Tcinza.shape)
-print("Tipo de dado da imagem em tons de cinza : ", imagem_Tcinza.dtype)
-print("Piso e teto dos valores na imagem em tons de cinza: ", imagem_Tcinza.min(), imagem_Tcinza.max())
+def main(image_path: str = "teste.png", n_niveis: int | None = None) -> None:
+    source = Path(image_path)
+    if not source.exists():
+        print(f"Erro: Arquivo '{image_path}' não encontrado.", file=sys.stderr)
+        return
 
-imagem_uint8 = util.img_as_ubyte(imagem_Tcinza)
+    imagem_rgb = io.imread(str(source))
+    imagem_Tcinza = color.rgb2gray(imagem_rgb)
 
-while True:
-    try:
-        n_niveis = int(input("Qual nível de bits você deseja? "))
-        if 1 <= n_niveis <= 8:
-            break
-        else:
-            print("Entrada inválida, por favor escreva um valor entre 1 e 8 (diferente de zero)")
-    except ValueError:
-        print("Entrada inválida, por favor digite apenas números inteiros de 1 à 8.")
+    print("Formato da imagem RGB é : ", imagem_rgb.shape)
+    print("Tipo de dado da imagem RGB : ", imagem_rgb.dtype)
+    print("Formato da imagem em tons de cinza é : ", imagem_Tcinza.shape)
+    print("Tipo de dado da imagem em tons de cinza : ", imagem_Tcinza.dtype)
+    print("Piso e teto dos valores na imagem em tons de cinza: ", imagem_Tcinza.min(), imagem_Tcinza.max())
 
-print(f"Nível escolhido de {n_niveis} bits.")     
+    imagem_uint8 = util.img_as_ubyte(imagem_Tcinza)
 
-n_tons = 2 ** n_niveis  
+    if n_niveis is None:
+        while True:
+            try:
+                n_niveis = int(input("Qual nível de bits você deseja? "))
+                if 1 <= n_niveis <= 8:
+                    break
+                print("Entrada inválida, por favor escreva um valor entre 1 e 8 (diferente de zero)")
+            except ValueError:
+                print("Entrada inválida, por favor digite apenas números inteiros de 1 à 8.")
 
-# Redimensionar a matriz da imagem para (N_pixels, 1) conforme esperado pelo scikit-learn
-pixels = imagem_uint8.reshape(-1, 1).astype(np.float32) 
+    print(f"Nível escolhido de {n_niveis} bits.")
+    n_tons = 2 ** n_niveis
 
-# Ajustar o modelo K-Means para encontrar os k centróides ideais
-kmeans = KMeans(n_clusters=n_tons, random_state=42, n_init=10)
-kmeans.fit(pixels)
+    pixels = imagem_uint8.reshape(-1, 1).astype(np.float32)
 
-# Pegar os valores dos centróides e converter para uint8
-centroides = np.uint8(np.round(kmeans.cluster_centers_))
+    kmeans = KMeans(n_clusters=n_tons, random_state=42, n_init=10)
+    kmeans.fit(pixels)
 
-# Substituir cada pixel pelo centróide atribuído ao seu rótulo (label)
-imagem_QuantizadaKMeans = centroides[kmeans.labels_].reshape(imagem_uint8.shape)
+    centroides = np.uint8(np.round(kmeans.cluster_centers_))
+    imagem_QuantizadaKMeans = centroides[kmeans.labels_].reshape(imagem_uint8.shape)
 
-# 4. Salvar a imagem resultante e exibir informações
-nome_saida = f"teste_quantiza_kmeans_{n_niveis}bits.png"
-io.imsave(nome_saida, imagem_QuantizadaKMeans)
-print(f"Imagem salva com sucesso como: {nome_saida}")
-print("Valor máximo e mínimo da imagem quantizada: ", imagem_QuantizadaKMeans.max(), imagem_QuantizadaKMeans.min())
+    nome_saida = f"teste_quantiza_kmeans_{n_niveis}bits.png"
+    io.imsave(nome_saida, imagem_QuantizadaKMeans)
+    print(f"Imagem salva com sucesso como: {nome_saida}")
+    print("Valor máximo e mínimo da imagem quantizada: ", imagem_QuantizadaKMeans.max(), imagem_QuantizadaKMeans.min())
+
+
+if __name__ == "__main__":
+    _path = sys.argv[1] if len(sys.argv) > 1 else "teste.png"
+    _bits = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    main(_path, _bits)

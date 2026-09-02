@@ -7,15 +7,19 @@ de código entre as diferentes visualizações da aplicação.
 """
 
 import base64
-import io
+import gc
 from pathlib import Path
 from typing import Any
 
 import flet as ft
 import numpy as np
-from PIL import Image
 
 from src.core.grayscale import GrayscaleMethod
+from src.core.image_io import (
+    MAX_IMAGE_DIMENSION,
+    array_to_png_bytes,
+    open_and_downscale_image,
+)
 from src.core.quantization import QuantizationTechnique
 
 
@@ -72,16 +76,21 @@ _GRAYSCALE_DETAILS: dict[GrayscaleMethod, dict[str, Any]] = {
 }
 
 _TECHNIQUE_OPTIONS: list[tuple[QuantizationTechnique | str, str]] = [
-    (QuantizationTechnique.UNIFORM, "Modo 1: Quantização Uniforme (Intervalos Iguais)"),
+    (QuantizationTechnique.UNIFORM, "Modo 1: Quantização Uniforme (Centróides / Intervalos Iguais)"),
     (QuantizationTechnique.KMEANS, "Modo 2: Quantização Não-Uniforme (K-Means Adaptativo)"),
     (QuantizationTechnique.HISTOGRAM, "Modo 3: Quantização por Histograma (Frequência/Quantis)"),
-    ("BOTH", "Modo 4: Comparação Completa (Script Histograma Comparativo 2×3)"),
+    (QuantizationTechnique.FLOYD_STEINBERG, "Modo 4: Dithering / Difusão de Erro (Floyd-Steinberg)"),
+    ("BOTH", "Modo 5: Comparação Completa (Uniforme × K-Means)"),
 ]
 
 
 # ---------------------------------------------------------------------------
 # Helpers de Compatibilidade e Conversão de Imagens
 # ---------------------------------------------------------------------------
+
+TRANSPARENT_PIXEL_PNG_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAA="
+)
 
 
 def _register_file_pickers(page: ft.Page, *pickers: ft.FilePicker) -> None:
@@ -95,33 +104,19 @@ def _register_file_pickers(page: ft.Page, *pickers: ft.FilePicker) -> None:
             page.overlay.append(picker)
 
 
-def _ndarray_to_png_bytes(arr: np.ndarray) -> bytes:
-    """Converte um array NumPy uint8 em bytes PNG em memória."""
-    if arr.ndim == 3 and arr.shape[2] == 4:
-        pil_img = Image.fromarray(arr, mode="RGBA")
-    elif arr.ndim == 3 and arr.shape[2] == 3:
-        pil_img = Image.fromarray(arr, mode="RGB")
-    else:
-        pil_img = Image.fromarray(arr, mode="L")
-    buffer = io.BytesIO()
-    pil_img.save(buffer, format="PNG")
-    return buffer.getvalue()
+def _ndarray_to_png_bytes(arr: np.ndarray, max_dim: int | None = None) -> bytes:
+    """Converte um array NumPy uint8 em bytes PNG em memória com downscaling opcional."""
+    return array_to_png_bytes(arr, max_dim=max_dim)
 
 
-def _bytes_to_data_uri(image_bytes: bytes) -> str:
+def _bytes_to_data_uri(image_bytes: bytes | None) -> str:
     """Converte bytes de imagem PNG em Data URI Base64 para exibição no Flet."""
+    if not image_bytes:
+        return TRANSPARENT_PIXEL_PNG_URI
     encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:image/png;base64,{encoded}"
 
 
-def _read_image_file(path: Path | str) -> np.ndarray:
-    """Carrega uma imagem do disco via PIL e converte para array NumPy RGB/L."""
-    path_obj = Path(path)
-    if not path_obj.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {path_obj}")
-
-    with Image.open(path_obj) as pil_img:
-        if pil_img.mode in ("RGBA", "LA", "P"):
-            pil_img = pil_img.convert("RGB")
-        return np.array(pil_img)
-
+def _read_image_file(path: Path | str, max_dim: int = MAX_IMAGE_DIMENSION) -> np.ndarray:
+    """Carrega uma imagem do disco via PIL com downscaling preventivo (máx 800×800 px)."""
+    return open_and_downscale_image(path, max_dim=max_dim)

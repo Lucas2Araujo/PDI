@@ -1,172 +1,294 @@
 """
-quantization.py — Módulo de Quantização de Imagens em Tons de Cinza.
+quantization.py — Módulo de Quantização de Imagens em Tons de Cinza e Coloridas (RGB).
 
-Implementa duas técnicas de quantização digital, reduzindo o número de níveis
-de intensidade (bits de quantização) de uma imagem em escala de cinza:
+Implementa técnicas de quantização digital, reduzindo o número de níveis
+de intensidade (bits de quantização / tamanho de paleta de cores) de imagens:
 
-1. **Quantização Uniforme**: Divide o intervalo [0, 255] em intervalos iguais.
-   Simples, rápida e determinística.
+1. **Quantização Uniforme**: Divide o intervalo [0, 255] em intervalos iguais e
+   reconstrói no centróide (ponto médio). Em RGB, aplica mapeamento escalar por canal,
+   resultando em (2^b)^3 cores no total.
 
-2. **Quantização Não-Uniforme (K-Means)**: Algoritmo de aprendizado de máquina
-   que encontra os k centróides ótimos baseados na distribuição real dos pixels.
-   Preserva melhor os detalhes visuais que a quantização uniforme.
+2. **Quantização Não-Uniforme (K-Means / MiniBatchKMeans)**: Algoritmo adaptativo
+   que encontra os k centróides ótimos no espaço 1D (cinza) ou espaço 3D de cores (RGB).
+   Carregado sob demanda (Lazy Loading) para acelerar a inicialização Web.
+
+3. **Quantização por Histograma**: Particionamento adaptativo por quantis/percentis.
+
+4. **Dithering por Difusão de Erro (Floyd-Steinberg)**: Difusão de resíduos de quantização
+   para os 4 vizinhos imediatos (7/16, 3/16, 5/16, 1/16) em matrizes 2D e tensores 3D RGB.
 
 Referências:
     - Gonzalez & Woods, "Digital Image Processing", Cap. 8.
     - Lloyd, S.P. (1982). "Least squares quantization in PCM". IEEE Transactions.
+    - Floyd, R.W. & Steinberg, L. (1976). "An Adaptive Algorithm for Spatial Grey Scale".
 """
 
 from enum import Enum, auto
-
+import gc
+from typing import Callable
 import numpy as np
-from sklearn.cluster import KMeans
+
+# Controle de estado de carregamento sob demanda do scikit-learn
+_KMEANS_CLASS = None
+_MINIBATCH_KMEANS_CLASS = None
 
 
 class QuantizationTechnique(Enum):
     """Técnicas de quantização disponíveis."""
 
-    UNIFORM = auto()    # Quantização Uniforme — intervalos iguais
-    KMEANS = auto()     # Quantização Não-Uniforme — K-Means adaptativo
-    HISTOGRAM = auto()  # Quantização por Histograma — particionamento adaptativo por quantis
+    UNIFORM = auto()          # Quantização Uniforme — intervalos iguais (centróides)
+    KMEANS = auto()           # Quantização Não-Uniforme — K-Means adaptativo
+    HISTOGRAM = auto()        # Quantização por Histograma — particionamento adaptativo por quantis
+    FLOYD_STEINBERG = auto()  # Quantização com Dithering — Difusão de Erro (Floyd-Steinberg)
+
+
+def is_kmeans_loaded() -> bool:
+    """Verifica se a classe KMeans do scikit-learn já foi importada em memória."""
+    return _KMEANS_CLASS is not None
+
+
+def get_kmeans_class(
+    on_start_load: Callable[[], None] | None = None,
+    on_done_load: Callable[[], None] | None = None,
+):
+    """
+    Importa e retorna a classe KMeans sob demanda (Lazy Loading), evitando o overhead
+    de importação de dezenas de megabytes do scikit-learn durante o boot inicial da aplicação.
+
+    Args:
+        on_start_load: Callback opcional executado antes de iniciar a importação.
+        on_done_load: Callback opcional executado imediatamente após a importação.
+
+    Returns:
+        Classe sklearn.cluster.KMeans.
+    """
+    global _KMEANS_CLASS
+    if _KMEANS_CLASS is None:
+        if on_start_load is not None:
+            on_start_load()
+        from sklearn.cluster import KMeans as _KM
+        _KMEANS_CLASS = _KM
+        if on_done_load is not None:
+            on_done_load()
+    return _KMEANS_CLASS
+
+
+def get_minibatch_kmeans_class(
+    on_start_load: Callable[[], None] | None = None,
+    on_done_load: Callable[[], None] | None = None,
+):
+    """
+    Importa e retorna a classe MiniBatchKMeans sob demanda (Lazy Loading).
+
+    Args:
+        on_start_load: Callback opcional executado antes de iniciar a importação.
+        on_done_load: Callback opcional executado imediatamente após a importação.
+
+    Returns:
+        Classe sklearn.cluster.MiniBatchKMeans.
+    """
+    global _MINIBATCH_KMEANS_CLASS
+    if _MINIBATCH_KMEANS_CLASS is None:
+        if on_start_load is not None:
+            on_start_load()
+        from sklearn.cluster import MiniBatchKMeans as _MBKM
+        _MINIBATCH_KMEANS_CLASS = _MBKM
+        if on_done_load is not None:
+            on_done_load()
+    return _MINIBATCH_KMEANS_CLASS
 
 
 def quantize(
-    image_gray: np.ndarray,
+    image: np.ndarray,
     bits: int,
     technique: QuantizationTechnique,
+    n_clusters: int | None = None,
 ) -> np.ndarray:
     """
-    Aplica a técnica de quantização especificada a uma imagem em escala de cinza.
+    Aplica a técnica de quantização especificada a uma imagem em tons de cinza (2D) ou colorida RGB (3D).
 
-    Dispatches para `quantize_uniform`, `quantize_kmeans` ou `quantize_histogram`.
+    Dispatches para `quantize_uniform`, `quantize_kmeans`, `quantize_histogram`
+    ou `quantizacao_dithering_floyd_steinberg`.
+
     Args:
-        image_gray: Array NumPy (H, W) dtype uint8 em escala de cinza.
-        bits: Número de bits de quantização. Deve estar no intervalo [1, 8].
+        image: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
+        bits: Número de bits de quantização (1 a 8).
         technique: Técnica de quantização a ser utilizada.
+        n_clusters: Opcional, número explícito de clusters/cores na paleta para K-Means.
 
     Returns:
-        Array NumPy (H, W) dtype uint8 com a imagem quantizada.
+        Array NumPy (H, W) ou (H, W, 3) dtype uint8 com a imagem quantizada.
 
     Raises:
-        ValueError: Se `bits` estiver fora do intervalo [1, 8] ou
-                    `technique` for desconhecida.
+        ValueError: Se `bits` estiver fora do intervalo [1, 8] ou `technique` for desconhecida.
     """
     if technique == QuantizationTechnique.UNIFORM:
-        return quantize_uniform(image_gray, bits)
+        return quantize_uniform(image, bits)
     if technique == QuantizationTechnique.KMEANS:
-        return quantize_kmeans(image_gray, bits)
+        return quantize_kmeans(image, bits=bits, n_clusters=n_clusters)
     if technique == QuantizationTechnique.HISTOGRAM:
-        return quantize_histogram(image_gray, bits)
+        return quantize_histogram(image, bits)
+    if technique == QuantizationTechnique.FLOYD_STEINBERG:
+        return quantizacao_dithering_floyd_steinberg(image, bits)
 
     raise ValueError(f"Técnica desconhecida: {technique}")
 
 
-def quantize_uniform(image_gray: np.ndarray, bits: int) -> np.ndarray:
+def quantize_uniform(image: np.ndarray, bits: int) -> np.ndarray:
     """
-    Quantização Uniforme: divide o espaço de intensidades [0, 255] em
-    intervalos de tamanho igual e remapeia cada pixel ao nível representativo
-    de seu intervalo.
+    Quantização Uniforme com Reconstrução por Centróides: divide o espaço de intensidades
+    [0, 255] em 2^bits intervalos de tamanho igual e remapeia cada pixel ao ponto médio
+    (centróide) do seu respectivo intervalo.
 
-    Fórmula:
-        passo = 256 / n_tons
-        índice = pixel // passo
-        saída  = índice * (255 / (n_tons - 1))
+    Fórmula (aplicada por canal em 2D ou 3D RGB):
+        n_tons = 2 ** bits
+        passo = 256.0 / n_tons
+        índice = np.clip(np.floor(imagem / passo), 0, n_tons - 1)
+        reconstrucao[i] = np.clip((i + 0.5) * passo, 0, 255).astype(np.uint8)
 
-    Complexidade: O(H·W) — linear no número de pixels.
+    Em imagens coloridas RGB (H, W, 3), a quantização produz (2^bits)^3 cores no total.
+
+    Complexidade: O(H·W·C) — linear no número de pixels, acelerado via vetorização NumPy.
 
     Args:
-        image_gray: Array NumPy (H, W) dtype uint8.
-        bits: Nível de quantização em bits (1 a 8), definindo n_tons = 2^bits.
+        image: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
+        bits: Nível de quantização em bits (1 a 8), definindo n_tons = 2^bits por canal.
 
     Returns:
-        Array NumPy (H, W) dtype uint8 com a imagem quantizada uniformemente.
+        Array NumPy (H, W) ou (H, W, 3) dtype uint8 com a imagem quantizada uniformemente.
 
     Raises:
-        ValueError: Se `bits` estiver fora do intervalo [1, 8].
+        ValueError: Se `bits` estiver fora do intervalo [1, 8] ou imagem for inválida.
     """
     _validate_bits(bits)
-    _validate_grayscale_image(image_gray)
+    _validate_image(image)
 
     n_tons = 2 ** bits
-    passo = 256 // n_tons
-    indices = image_gray // passo
-    fator_escala = 255 // (n_tons - 1)
-    quantizada = (indices * fator_escala).astype(np.uint8)
+    passo = 256.0 / n_tons
 
+    # Mapeamento do índice de partição para cada pixel/canal em 2^bits intervalos iguais
+    indices = np.clip(np.floor(image.astype(np.float32) / passo), 0, n_tons - 1).astype(np.intp)
+
+    # Reconstrução baseada no CENTRÓIDE (ponto médio de cada partição)
+    reconstrucao = np.clip((np.arange(n_tons, dtype=np.float32) + 0.5) * passo, 0, 255).astype(np.uint8)
+
+    quantizada = reconstrucao[indices]
+    del indices, reconstrucao
     return quantizada
 
 
 def quantize_kmeans(
-    image_gray: np.ndarray,
-    bits: int,
+    image: np.ndarray,
+    bits: int = 4,
+    n_clusters: int | None = None,
     random_state: int = 42,
     n_init: int = 10,
+    use_minibatch: bool = True,
+    on_start_load: Callable[[], None] | None = None,
+    on_done_load: Callable[[], None] | None = None,
 ) -> np.ndarray:
     """
-    Quantização Não-Uniforme via K-Means: encontra os k = 2^bits centróides
-    que minimizam a distância intra-cluster no espaço de intensidades dos pixels.
+    Quantização Não-Uniforme via K-Means: encontra os k centróides ótimos
+    que minimizam a distância intra-cluster no espaço de intensidades (1D para cinza, 3D para RGB).
 
-    Os centróides resultantes representam os níveis de cinza que melhor
-    preservam a distribuição original de intensidades.
-
-    Complexidade: O(H·W · k · iterações) — mais lento que a quantização uniforme
-    para imagens grandes, mas com maior qualidade visual.
+    Em imagens RGB, executa quantização vetorial no espaço tridimensional de cores agrupando
+    (H*W, 3) pixels em k cores de paleta representativas.
 
     Args:
-        image_gray: Array NumPy (H, W) dtype uint8.
-        bits: Nível de quantização em bits (1 a 8), definindo k = 2^bits clusters.
+        image: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
+        bits: Nível de quantização em bits (1 a 8), definindo k = 2^bits quando n_clusters não for informado.
+        n_clusters: Opcional, quantidade explícita de cores/clusters na paleta final.
         random_state: Semente aleatória para reprodutibilidade dos resultados.
-        n_init: Número de inicializações do K-Means (maior = mais estável, mais lento).
+        n_init: Número de inicializações do K-Means.
+        use_minibatch: Se True, utiliza MiniBatchKMeans para velocidade máxima em imagens grandes.
+        on_start_load: Callback opcional executado caso scikit-learn precise ser importado.
+        on_done_load: Callback opcional executado após a importação do scikit-learn.
 
     Returns:
-        Array NumPy (H, W) dtype uint8 com a imagem quantizada pelo K-Means.
+        Array NumPy (H, W) ou (H, W, 3) dtype uint8 com a imagem quantizada pelo K-Means.
 
     Raises:
-        ValueError: Se `bits` estiver fora do intervalo [1, 8].
+        ValueError: Se `bits` ou `n_clusters` forem inválidos.
     """
-    _validate_bits(bits)
-    _validate_grayscale_image(image_gray)
+    if n_clusters is None:
+        _validate_bits(bits)
+        k = 2 ** bits
+    else:
+        if not isinstance(n_clusters, int) or n_clusters < 1 or n_clusters > 1024:
+            raise ValueError(f"n_clusters deve ser um inteiro entre 1 e 1024. Recebido: {n_clusters!r}")
+        k = n_clusters
 
-    n_tons = 2 ** bits
+    _validate_image(image)
 
-    # Achata a imagem em um vetor coluna (N_pixels, 1) — formato esperado pelo scikit-learn
-    pixels = image_gray.reshape(-1, 1).astype(np.float32)
+    # Carrega classe de K-Means sob demanda
+    if use_minibatch:
+        ClusterClass = get_minibatch_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
+    else:
+        ClusterClass = get_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
 
-    kmeans = KMeans(n_clusters=n_tons, random_state=random_state, n_init=n_init)
-    kmeans.fit(pixels)
+    # Prepara matriz de pixels (N_pixels, 1) para 2D cinza ou (N_pixels, 3) para 3D RGB
+    is_3d = (image.ndim == 3)
+    pixels = image.reshape(-1, 3 if is_3d else 1).astype(np.float32)
 
-    # Mapeia cada centróide para uint8 e reconstrói a imagem na forma original
-    centroides = np.uint8(np.round(kmeans.cluster_centers_))
-    quantizada = centroides[kmeans.labels_].reshape(image_gray.shape)
+    # Se a quantidade de pixels únicos for menor que k, ajusta k
+    num_samples = pixels.shape[0]
+    effective_k = min(k, num_samples)
 
-    return quantizada
+    try:
+        if use_minibatch:
+            batch_size = min(2048, max(256, num_samples // 10))
+            cluster_model = ClusterClass(
+                n_clusters=effective_k,
+                random_state=random_state,
+                n_init=n_init,
+                batch_size=batch_size,
+            )
+        else:
+            cluster_model = ClusterClass(
+                n_clusters=effective_k,
+                random_state=random_state,
+                n_init=n_init,
+            )
+
+        cluster_model.fit(pixels)
+
+        # Mapeia cada centróide para uint8 [0, 255] e reconstrói a imagem na forma original
+        centroides = np.uint8(np.clip(np.round(cluster_model.cluster_centers_), 0, 255))
+        quantizada = centroides[cluster_model.labels_].reshape(image.shape)
+        return quantizada
+    finally:
+        del pixels
+        gc.collect()
 
 
-def quantize_histogram(image_gray: np.ndarray, bits: int) -> np.ndarray:
+def quantize_histogram(image: np.ndarray, bits: int) -> np.ndarray:
     """
     Quantização Baseada em Histograma: divide o espaço de intensidades em
     intervalos baseados na distribuição de frequência acumulada (quantis/percentis)
     dos pixels.
 
-    Faixas de intensidade com maior densidade de pixels recebem maior precisão
-    (mais níveis), enquanto regiões com poucos pixels são agrupadas em faixas mais largas.
+    Para imagens coloridas RGB (H, W, 3), a quantização é aplicada canal por canal.
 
     Args:
-        image_gray: Array NumPy (H, W) dtype uint8 em escala de cinza.
+        image: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
         bits: Número de bits de quantização (1 a 8).
 
     Returns:
-        Array NumPy (H, W) dtype uint8 quantizado por histograma.
+        Array NumPy (H, W) ou (H, W, 3) dtype uint8 quantizado por histograma.
     """
     _validate_bits(bits)
-    _validate_grayscale_image(image_gray)
+    _validate_image(image)
+
+    if image.ndim == 3:
+        # Aplica quantização por quantis em cada canal RGB individualmente
+        channels = [quantize_histogram(image[:, :, c], bits) for c in range(image.shape[2])]
+        return np.stack(channels, axis=2)
 
     n_tons = 2 ** bits
     if n_tons >= 256:
-        return image_gray.copy()
+        return image.copy()
 
-    flat = image_gray.ravel()
-    # Percentis equiprováveis
+    flat = image.ravel()
     percentiles = np.linspace(0, 100, n_tons + 1)
     bins = np.percentile(flat, percentiles)
     bins[0] = 0.0
@@ -174,12 +296,12 @@ def quantize_histogram(image_gray: np.ndarray, bits: int) -> np.ndarray:
     bins = np.unique(bins)
 
     if len(bins) <= 1:
-        return image_gray.copy()
+        return image.copy()
 
     # Mapeia cada pixel para sua faixa
     digitized = np.digitize(flat, bins[1:-1])
 
-    # Calcula o centroide / média real dos pixels em cada faixa
+    # Calcula o centróide / média real dos pixels em cada faixa
     out_levels = np.zeros(len(bins), dtype=np.uint8)
     for i in range(len(bins)):
         mask = (digitized == i)
@@ -189,8 +311,168 @@ def quantize_histogram(image_gray: np.ndarray, bits: int) -> np.ndarray:
             idx = min(i, len(bins) - 1)
             out_levels[i] = np.uint8(np.clip(np.round(bins[idx]), 0, 255))
 
-    quantizada = out_levels[digitized].reshape(image_gray.shape)
+    quantizada = out_levels[digitized].reshape(image.shape)
+    del flat, digitized, bins, percentiles, out_levels
     return quantizada
+
+
+_FS_W7: float = 7.0 / 16.0
+_FS_W3: float = 3.0 / 16.0
+_FS_W5: float = 5.0 / 16.0
+_FS_W1: float = 1.0 / 16.0
+
+
+def _diffuse_floyd_steinberg_2d(
+    flat: np.ndarray,
+    idx: int,
+    next_y_offset: int,
+    x: int,
+    w: int,
+    has_next_row: bool,
+    err: float,
+) -> None:
+    """Difunde o erro residual 2D para os 4 vizinhos imediatos não processados."""
+    if x + 1 < w:
+        flat[idx + 1] += err * _FS_W7
+    if has_next_row:
+        n_idx = next_y_offset + x
+        if x > 0:
+            flat[n_idx - 1] += err * _FS_W3
+        flat[n_idx] += err * _FS_W5
+        if x + 1 < w:
+            flat[n_idx + 1] += err * _FS_W1
+
+
+def quantizacao_dithering_floyd_steinberg(
+    imagem_uint8: np.ndarray,
+    n_bits: int,
+) -> np.ndarray:
+    """
+    Quantização com Difusão de Erro Residual (Dithering de Floyd-Steinberg).
+
+    Percorre os pixels da imagem em ordem raster (linha por linha, esquerda para direita),
+    quantiza o valor float do pixel atual para o nível representativo mais próximo da paleta
+    de 2^n_bits tons e difunde o erro residual de quantização para os 4 vizinhos imediatos
+    não processados de acordo com os pesos clássicos de Floyd-Steinberg (1976):
+        - Direita:          7/16  (+1,  0)
+        - Abaixo-esquerda:  3/16  (-1, +1)
+        - Abaixo:           5/16  ( 0, +1)
+        - Abaixo-direita:   1/16  (+1, +1)
+
+    Suporta tanto matrizes 2D em escala de cinza (H, W) quanto tensores coloridos RGB (H, W, 3),
+    difundindo o vetor de erro residual [eR, eG, eB] de forma contínua.
+
+    Possui tratamento estrito de bordas para não estourar os limites da matriz e
+    retorna a imagem final com valores recortados no intervalo [0, 255] em dtype uint8.
+
+    Args:
+        imagem_uint8: Array NumPy (H, W) ou (H, W, 3) dtype uint8.
+        n_bits: Número de bits de quantização (1 a 8), definindo 2^n_bits níveis por canal.
+
+    Returns:
+        Array NumPy (H, W) ou (H, W, 3) dtype uint8 com a imagem quantizada e aprimorada por dithering.
+
+    Raises:
+        ValueError: Se `n_bits` estiver fora do intervalo [1, 8] ou se a imagem for inválida.
+    """
+    _validate_bits(n_bits)
+    _validate_image(imagem_uint8)
+
+    if n_bits == 8:
+        return imagem_uint8.copy()
+
+    n_levels = 2 ** n_bits
+    scale = 255.0 / (n_levels - 1)
+    inv_scale = (n_levels - 1) / 255.0
+    max_k = n_levels - 1
+    palette = np.array([round(k * scale) for k in range(n_levels)], dtype=np.uint8)
+
+    # -----------------------------------------------------------------------
+    # Caso 1: Imagem Colorida RGB (H, W, 3)
+    # -----------------------------------------------------------------------
+    if imagem_uint8.ndim == 3:
+        h, w, c = imagem_uint8.shape
+        arr = imagem_uint8.astype(np.float32)
+        out = np.empty((h, w, 3), dtype=np.uint8)
+
+        for y in range(h):
+            has_next_row = (y + 1 < h)
+            for x in range(w):
+                # Processa os 3 canais [R, G, B] para o pixel atual
+                err_r: float = 0.0
+                err_g: float = 0.0
+                err_b: float = 0.0
+
+                for ch in range(3):
+                    old_val = arr[y, x, ch]
+                    v = old_val * inv_scale
+                    k = int(v + 0.5) if v >= 0.0 else int(v - 0.5)
+                    k = max(0, min(max_k, k))
+                    new_val_f = k * scale
+                    out[y, x, ch] = palette[k]
+                    err = old_val - new_val_f
+                    if ch == 0:
+                        err_r = err
+                    elif ch == 1:
+                        err_g = err
+                    else:
+                        err_b = err
+
+                # Difusão vetorial do resíduo [err_r, err_g, err_b] aos vizinhos
+                err_vec = np.array([err_r, err_g, err_b], dtype=np.float32)
+
+                # Direita (+1, 0) -> 7/16
+                if x + 1 < w:
+                    arr[y, x + 1] += err_vec * _FS_W7
+
+                if has_next_row:
+                    # Abaixo-esquerda (-1, +1) -> 3/16
+                    if x > 0:
+                        arr[y + 1, x - 1] += err_vec * _FS_W3
+                    # Abaixo (0, +1) -> 5/16
+                    arr[y + 1, x] += err_vec * _FS_W5
+                    # Abaixo-direita (+1, +1) -> 1/16
+                    if x + 1 < w:
+                        arr[y + 1, x + 1] += err_vec * _FS_W1
+
+        del arr, palette
+        return out
+
+    # -----------------------------------------------------------------------
+    # Caso 2: Imagem Monocromática 2D (H, W)
+    # -----------------------------------------------------------------------
+    h, w = imagem_uint8.shape
+    arr = imagem_uint8.astype(np.float32)
+    flat = arr.ravel()
+    out = np.empty((h, w), dtype=np.uint8)
+    out_flat = out.ravel()
+
+    for y in range(h):
+        y_offset = y * w
+        next_y_offset = y_offset + w
+        has_next_row = (y + 1 < h)
+        for x in range(w):
+            idx = y_offset + x
+            old = flat[idx]
+
+            # Quantização para o nível mais próximo em float
+            v = old * inv_scale
+            k = int(v + 0.5) if v >= 0.0 else int(v - 0.5)
+            k = max(0, min(max_k, k))
+
+            new_val_f = k * scale
+            out_flat[idx] = palette[k]
+            err = old - new_val_f
+
+            # Difusão de erro para vizinhos
+            _diffuse_floyd_steinberg_2d(flat, idx, next_y_offset, x, w, has_next_row, err)
+
+    del arr, flat, out_flat, palette
+    return out
+
+
+# Alias compatível com as demais funções de quantização do módulo
+quantize_floyd_steinberg = quantizacao_dithering_floyd_steinberg
 
 
 def technique_label(technique: QuantizationTechnique) -> str:
@@ -204,9 +486,10 @@ def technique_label(technique: QuantizationTechnique) -> str:
         Nome formatado da técnica para exibição na interface ou logs.
     """
     labels = {
-        QuantizationTechnique.UNIFORM: "Quantização Uniforme",
+        QuantizationTechnique.UNIFORM: "Quantização Uniforme (Centróides)",
         QuantizationTechnique.KMEANS: "Quantização Não-Uniforme (K-Means)",
         QuantizationTechnique.HISTOGRAM: "Quantização por Histograma (Frequência)",
+        QuantizationTechnique.FLOYD_STEINBERG: "Dithering por Difusão de Erro (Floyd-Steinberg)",
     }
     return labels[technique]
 
@@ -224,6 +507,25 @@ def _validate_bits(bits: int) -> None:
         )
 
 
+def _validate_image(image: np.ndarray) -> None:
+    """Valida que o array de entrada é uma imagem NumPy válida (2D cinza ou 3D RGB com 3 canais) em uint8."""
+    if not isinstance(image, np.ndarray):
+        raise ValueError("A imagem deve ser um array NumPy.")
+    if image.ndim not in (2, 3):
+        raise ValueError(
+            f"Esperado array 2D (H, W) ou 3D (H, W, 3). "
+            f"Recebido array com {image.ndim} dimensões."
+        )
+    if image.ndim == 3 and image.shape[2] != 3:
+        raise ValueError(
+            f"Esperado array 3D com 3 canais RGB (H, W, 3). Recebido shape: {image.shape}."
+        )
+    if image.dtype != np.uint8:
+        raise ValueError(
+            f"Esperado dtype uint8. Recebido: {image.dtype}."
+        )
+
+
 def _validate_grayscale_image(image: np.ndarray) -> None:
     """Valida que o array de entrada é uma imagem 2D em escala de cinza."""
     if not isinstance(image, np.ndarray):
@@ -235,7 +537,5 @@ def _validate_grayscale_image(image: np.ndarray) -> None:
         )
     if image.dtype != np.uint8:
         raise ValueError(
-            f"Esperado dtype uint8. Recebido: {image.dtype}. "
-            "Use src.core.grayscale.to_grayscale() para preparar a imagem."
+            f"Esperado dtype uint8. Recebido: {image.dtype}."
         )
-

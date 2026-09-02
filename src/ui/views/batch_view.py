@@ -19,6 +19,7 @@ import io
 from pathlib import Path
 from typing import Any
 import zipfile
+import gc
 
 import flet as ft
 import numpy as np
@@ -41,8 +42,16 @@ from src.core.grayscale import (
     method_label,
     to_grayscale,
 )
+from src.core.image_io import (
+    MAX_IMAGE_DIMENSION,
+    MAX_THUMBNAIL_DIMENSION,
+    array_to_png_bytes,
+    open_and_downscale_image,
+)
 from src.core.quantization import (
     QuantizationTechnique,
+    get_kmeans_class,
+    is_kmeans_loaded,
     technique_label,
 )
 from src.core.samples import (
@@ -92,26 +101,20 @@ class _BatchQueueItem:
 
         self._inspect_item()
 
-    def _inspect_item() -> None:
-        pass
-
     def _inspect_item(self) -> None:
         try:
             if self.array is None:
                 if self.raw_bytes is not None:
-                    with Image.open(io.BytesIO(self.raw_bytes)) as pil_img:
-                        if pil_img.mode in ("RGBA", "LA", "P"):
-                            pil_img = pil_img.convert("RGB")
-                        self.array = np.array(pil_img)
+                    self.array = open_and_downscale_image(self.raw_bytes, max_dim=MAX_IMAGE_DIMENSION)
                 elif self.path is not None and self.path.exists():
-                    self.array = _read_image_file(self.path)
+                    self.array = open_and_downscale_image(self.path, max_dim=MAX_IMAGE_DIMENSION)
 
             if self.array is not None:
                 h, w = self.array.shape[:2]
                 self.dimensions = f"{w}×{h} px"
                 is_color = bool(self.array.ndim == 3 and self.array.shape[2] >= 3)
                 self.color_type = "RGB (24 bpp)" if is_color else "Cinza (8 bpp)"
-                self.thumb_bytes = make_thumbnail_png(self.array, max_size=160)
+                self.thumb_bytes = make_thumbnail_png(self.array, max_size=MAX_THUMBNAIL_DIMENSION)
         except Exception:
             self.dimensions = "Erro"
             self.color_type = "Desconhecido"
@@ -265,6 +268,61 @@ class BatchView(ft.Column):
         )
 
         # ── Menu de Configurações ─────────────────────────────────────────
+        self._convert_to_gray = True
+        self._convert_grayscale_toggle = ft.SegmentedButton(
+            segments=[
+                ft.Segment(
+                    value="yes",
+                    label=ft.Text("Sim (Tons de Cinza)", size=theme.FONT_BODY),
+                    icon=ft.Icon(ft.Icons.TONALITY),
+                ),
+                ft.Segment(
+                    value="no",
+                    label=ft.Text("Não (Preservar RGB)", size=theme.FONT_BODY),
+                    icon=ft.Icon(ft.Icons.PALETTE),
+                ),
+            ],
+            selected=["yes"],
+            on_change=self._on_convert_grayscale_toggled,
+            show_selected_icon=False,
+        )
+        self._preprocess_box = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.SETTINGS_SUGGEST, size=18, color=theme.PRIMARY_LIGHT),
+                            ft.Text(
+                                "Modo de Entrada / Pré-Processamento do Lote:",
+                                weight=ft.FontWeight.BOLD,
+                                size=theme.FONT_SUBTITLE,
+                                color=ft.Colors.ON_SURFACE,
+                            ),
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Text(
+                        "Converter para Tons de Cinza antes de processar?",
+                        size=theme.FONT_BODY,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE,
+                    ),
+                    ft.Row(controls=[self._convert_grayscale_toggle], alignment=ft.MainAxisAlignment.CENTER),
+                    ft.Text(
+                        "• Se MARCADO (Sim): converte todas as imagens para 1 canal (Grayscale) antes de entrar no quantizador.\n"
+                        "• Se DESMARCADO (Não): preserva os 3 canais (RGB) e quantiza o lote no espaço de cores tridimensional.",
+                        size=theme.FONT_CAPTION,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ],
+                spacing=6,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=8,
+            padding=10,
+        )
+
         self._gray_category_selector = ft.SegmentedButton(
             segments=[
                 ft.Segment(
@@ -339,6 +397,17 @@ class BatchView(ft.Column):
             padding=10,
         )
 
+        self._gray_section_container = ft.Column(
+            controls=[
+                ft.Text("2. Método de Conversão para Escala de Cinza / Canais:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
+                self._gray_category_selector,
+                self._gray_options_selector,
+                self._gray_info_box,
+            ],
+            spacing=8,
+            visible=True,
+        )
+
         # Dropdown: Técnica de Quantização
         self._technique_dropdown = ft.Dropdown(
             label="Técnica de Quantização",
@@ -373,6 +442,12 @@ class BatchView(ft.Column):
             color=ft.Colors.ON_SURFACE,
             weight=ft.FontWeight.BOLD,
         )
+        self._bits_slider_hint = ft.Text(
+            "1=2 tons · 2=4 tons · 3=8 tons · 4=16 tons · 5=32 tons · 6=64 tons · 7=128 tons · 8=256 tons",
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            size=theme.FONT_CAPTION,
+            text_align=ft.TextAlign.CENTER,
+        )
         self._bits_slider = ft.Slider(
             min=1,
             max=8,
@@ -384,6 +459,7 @@ class BatchView(ft.Column):
             expand=True,
             on_change=self._on_bits_changed,
         )
+        self._update_bits_label()
 
         # ── Progresso ────────────────────────────────────────────────────
         self._progress_bar = ft.ProgressBar(
@@ -531,12 +607,10 @@ class BatchView(ft.Column):
                     controls=[
                         theme.section_title("⚙️  Configurações de Quantização do Lote"),
                         ft.Divider(height=1),
-                        ft.Text("1. Método de Conversão para Escala de Cinza / Canais:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
-                        self._gray_category_selector,
-                        self._gray_options_selector,
-                        self._gray_info_box,
+                        self._preprocess_box,
+                        self._gray_section_container,
                         ft.Divider(height=1),
-                        ft.Text("2. Técnica e Resolução em Bits:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
+                        ft.Text("3. Técnica e Resolução em Bits:", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
                         self._technique_dropdown,
                         ft.Column(
                             controls=[
@@ -555,6 +629,7 @@ class BatchView(ft.Column):
                                     ],
                                     spacing=4,
                                 ),
+                                self._bits_slider_hint,
                             ],
                             spacing=6,
                         ),
@@ -622,7 +697,7 @@ class BatchView(ft.Column):
 
         for item in self._queue_items:
             img_ctrl = ft.Image(
-                src=_bytes_to_data_uri(item.thumb_bytes) if item.thumb_bytes else "",
+                src=_bytes_to_data_uri(item.thumb_bytes),
                 width=80,
                 height=80,
                 fit=getattr(ft.BoxFit, "COVER", None) if hasattr(ft, "BoxFit") else None,
@@ -700,7 +775,7 @@ class BatchView(ft.Column):
             name = s["name"]
             try:
                 p = get_sample_path(name)
-                b = load_sample_bytes(name)
+                b = load_sample_bytes(name, max_dim=MAX_IMAGE_DIMENSION)
                 sample_items.append((name, p, b))
             except Exception:
                 continue
@@ -930,6 +1005,33 @@ class BatchView(ft.Column):
         self._gray_info_formula.value = f"Fórmula: {details['formula']}"
         self._gray_info_desc.value = details["desc"]
 
+    def _on_convert_grayscale_toggled(self, event: ft.ControlEvent) -> None:
+        """Alterna entre modo Grayscale (1 canal) e modo Colorido Direto (3 canais RGB) no lote."""
+        selected = getattr(event.control, "selected", None)
+        if not selected:
+            return
+        mode_str = next(iter(selected))
+        self._convert_to_gray = (mode_str == "yes")
+        self._gray_section_container.visible = self._convert_to_gray
+        self._update_bits_label()
+        self._page.update()
+
+    def _update_bits_label(self) -> None:
+        """Atualiza dinamicamente o texto explicativo do slider conforme o modo e a técnica."""
+        if self._convert_to_gray:
+            n_tons = 2 ** self._bits_value
+            self._bits_label.value = f"{self._bits_value} bits  —  {n_tons} tons de cinza"
+            self._bits_slider_hint.value = "1=2 tons · 2=4 tons · 3=8 tons · 4=16 tons · 5=32 tons · 6=64 tons · 7=128 tons · 8=256 tons"
+        else:
+            if self._selected_technique == QuantizationTechnique.KMEANS:
+                n_cores = 2 ** self._bits_value
+                self._bits_label.value = f"Paleta de {n_cores} cores  —  K-Means 3D ({self._bits_value} bits)"
+                self._bits_slider_hint.value = f"Quantização vetorial 3D agrupando em {n_cores} centróides de cores RGB"
+            else:
+                total_cores = (2 ** self._bits_value) ** 3
+                self._bits_label.value = f"{self._bits_value} bits/canal  —  {total_cores} cores no total ((2^{self._bits_value})^3)"
+                self._bits_slider_hint.value = f"Mapeamento escalar por canal: R, G, B em {2**self._bits_value} níveis cada -> {total_cores} cores"
+
     def _on_technique_changed(self, event: ft.ControlEvent) -> None:
         val = event.control.value
         try:
@@ -937,15 +1039,33 @@ class BatchView(ft.Column):
             for t in QuantizationTechnique:
                 if t.value == int_val:
                     self._selected_technique = t
-                    return
+                    if t == QuantizationTechnique.KMEANS:
+                        self._check_and_notify_kmeans_lazy()
+                    break
         except ValueError:
             self._selected_technique = val
+            if val == "BOTH":
+                self._check_and_notify_kmeans_lazy()
+        self._update_bits_label()
+        self._page.update()
+
+    def _check_and_notify_kmeans_lazy(self) -> None:
+        """Notifica o usuário com SnackBar na primeira vez que o módulo K-Means é requisitado."""
+        if not is_kmeans_loaded():
+            self._show_message("⏳ Carregando módulo de quantização K-Means (scikit-learn)...", theme.INFO)
+            def _loader():
+                get_kmeans_class()
+                self._show_message("✅ Módulo de quantização K-Means pronto para uso!", theme.SUCCESS)
+
+            if hasattr(self._page, "run_thread"):
+                self._page.run_thread(_loader)
+            else:
+                import threading
+                threading.Thread(target=_loader, daemon=True).start()
 
     def _on_bits_changed(self, event: ft.ControlEvent) -> None:
         self._bits_value = int(event.control.value)
-        self._bits_label.value = (
-            f"{self._bits_value} bits  —  {2 ** self._bits_value} tons de cinza"
-        )
+        self._update_bits_label()
         self._page.update()
 
     # -----------------------------------------------------------------------
@@ -996,25 +1116,26 @@ class BatchView(ft.Column):
         technique = self._get_selected_technique()
         gray_method = self._selected_gray_method
         bits = self._bits_value
+        convert_to_gray = self._convert_to_gray
 
         if self._is_web or self._web_file_data:
             if hasattr(self._page, "run_thread"):
-                self._page.run_thread(self._run_worker_memory, technique, bits, gray_method)
+                self._page.run_thread(self._run_worker_memory, technique, bits, gray_method, convert_to_gray)
             else:
                 import threading
                 threading.Thread(
                     target=self._run_worker_memory,
-                    args=(technique, bits, gray_method),
+                    args=(technique, bits, gray_method, convert_to_gray),
                     daemon=True,
                 ).start()
         else:
             if hasattr(self._page, "run_thread"):
-                self._page.run_thread(self._run_worker_filesystem, technique, bits, gray_method)
+                self._page.run_thread(self._run_worker_filesystem, technique, bits, gray_method, convert_to_gray)
             else:
                 import threading
                 threading.Thread(
                     target=self._run_worker_filesystem,
-                    args=(technique, bits, gray_method),
+                    args=(technique, bits, gray_method, convert_to_gray),
                     daemon=True,
                 ).start()
 
@@ -1023,6 +1144,7 @@ class BatchView(ft.Column):
         technique: QuantizationTechnique,
         bits: int,
         grayscale_method: GrayscaleMethod,
+        convert_to_gray: bool = True,
     ) -> None:
         """Worker em memória (web ou imagens carregadas com bytes)."""
         try:
@@ -1045,6 +1167,7 @@ class BatchView(ft.Column):
                 technique=technique,
                 bits=bits,
                 grayscale_method=grayscale_method,
+                convert_to_grayscale=convert_to_gray,
                 progress_callback=self._on_progress,
                 item_callback=self._on_item_finished,
             )
@@ -1061,6 +1184,7 @@ class BatchView(ft.Column):
         technique: QuantizationTechnique,
         bits: int,
         grayscale_method: GrayscaleMethod,
+        convert_to_gray: bool = True,
     ) -> None:
         """Worker no disco (desktop)."""
         try:
@@ -1072,7 +1196,7 @@ class BatchView(ft.Column):
                 images = [it.path for it in self._queue_items if it.path is not None]
 
             if not images:
-                self._run_worker_memory(technique, bits, grayscale_method)
+                self._run_worker_memory(technique, bits, grayscale_method, convert_to_gray)
                 return
 
             out_dir = self._output_dir or (ASSETS_DIR / "lote_resultado")
@@ -1082,6 +1206,7 @@ class BatchView(ft.Column):
                 technique=technique,
                 bits=bits,
                 grayscale_method=grayscale_method,
+                convert_to_grayscale=convert_to_gray,
                 progress_callback=self._on_progress,
                 item_callback=self._on_item_finished,
             )
@@ -1147,7 +1272,23 @@ class BatchView(ft.Column):
         self._progress_percent.value = "100%"
         self._progress_text.value = f"🎉 Processamento concluído em {result.total_elapsed_seconds:.2f}s!"
 
-        # 1. Monta Card de Resumo Geral
+        # 1. Atualiza e exibe o resumo estatístico geral
+        self._summary_card.content = self._build_summary_card(result)
+        self._summary_card.visible = True
+
+        # 2. Constrói a galeria com os cards modulares de cada item
+        self._results_gallery.controls = [
+            self._build_result_item_card(item)
+            for item in result.items
+            if item.success
+        ]
+        self._results_gallery_container.visible = bool(self._results_gallery.controls)
+
+        self._show_message(f"🎉 Lote concluído com sucesso ({result.success_count} imagens quantizadas)!")
+        self._page.update()
+
+    def _build_summary_card(self, result: BatchResult) -> ft.Container:
+        """Constrói o card de resumo geral com métricas agregadas do lote."""
         summary_col = ft.Column(
             controls=[
                 theme.section_title("📊  Resumo Geral do Processamento em Lote"),
@@ -1192,165 +1333,156 @@ class BatchView(ft.Column):
             ],
             spacing=10,
         )
-        self._summary_card.content = theme.card(summary_col)
-        self._summary_card.visible = True
+        return theme.card(summary_col)
 
-        # 2. Monta a Galeria de Resultados Detalhada
-        self._results_gallery.controls.clear()
+    def _build_result_item_card(self, item: BatchItemResult) -> ft.Container:
+        """Constrói o card interativo de um item individual da galeria de resultados."""
+        src_thumb = item.source_thumb_bytes or make_thumbnail_png(item.raw_array, MAX_THUMBNAIL_DIMENSION)
+        quant_thumb = item.quantized_thumb_bytes or make_thumbnail_png(item.quantized_array, MAX_THUMBNAIL_DIMENSION)
 
-        for item in result.items:
-            if not item.success:
-                continue
+        orig_img = ft.Image(
+            src=_bytes_to_data_uri(src_thumb),
+            width=110,
+            height=110,
+            fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
+            border_radius=8,
+        )
+        quant_img = ft.Image(
+            src=_bytes_to_data_uri(quant_thumb),
+            width=110,
+            height=110,
+            fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
+            border_radius=8,
+        )
 
-            src_thumb = item.source_thumb_bytes or make_thumbnail_png(item.raw_array, 160)
-            quant_thumb = item.quantized_thumb_bytes or make_thumbnail_png(item.quantized_array, 160)
+        btn_zoom = ft.Button(
+            content="🔍 Zoom",
+            icon=ft.Icons.ZOOM_IN,
+            on_click=lambda _, it=item: open_zoom_dialog(
+                self._page, f"Resultado Quantizado — {it.filename}", it.quantized_bytes
+            ),
+            bgcolor=theme.PRIMARY_LIGHT,
+            color="#FFFFFF",
+        )
 
-            orig_img = ft.Image(
-                src=_bytes_to_data_uri(src_thumb) if src_thumb else "",
-                width=110,
-                height=110,
-                fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
-                border_radius=8,
-            )
-            quant_img = ft.Image(
-                src=_bytes_to_data_uri(quant_thumb) if quant_thumb else "",
-                width=110,
-                height=110,
-                fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
-                border_radius=8,
-            )
+        btn_inspect = ft.Button(
+            content="🔬 Entranhas do Processo",
+            icon=ft.Icons.ANALYTICS,
+            on_click=lambda _, it=item: open_inspector_dialog(
+                page=self._page,
+                raw_image=it.raw_array,
+                gray_image=it.gray_array,
+                quantized_image=it.quantized_array,
+                bits=self._bits_value,
+                technique=self._get_selected_technique(),
+                method=self._selected_gray_method,
+            ),
+            bgcolor=theme.ACCENT,
+            color="#FFFFFF",
+        )
 
-            btn_zoom = ft.Button(
-                content="🔍 Zoom",
-                icon=ft.Icons.ZOOM_IN,
-                on_click=lambda _, it=item: open_zoom_dialog(
-                    self._page, f"Resultado Quantizado — {it.filename}", it.quantized_bytes
-                ),
-                bgcolor=theme.PRIMARY_LIGHT,
-                color="#FFFFFF",
-            )
+        btn_save = ft.OutlinedButton(
+            content="💾 Baixar",
+            icon=ft.Icons.DOWNLOAD,
+            on_click=lambda _, it=item: self._save_single_item(it),
+        )
 
-            btn_inspect = ft.Button(
-                content="🔬 Entranhas do Processo",
-                icon=ft.Icons.ANALYTICS,
-                on_click=lambda _, it=item: open_inspector_dialog(
-                    page=self._page,
-                    raw_image=it.raw_array,
-                    gray_image=it.gray_array,
-                    quantized_image=it.quantized_array,
-                    bits=self._bits_value,
-                    technique=self._get_selected_technique(),
-                    method=self._selected_gray_method,
-                ),
-                bgcolor=theme.ACCENT,
-                color="#FFFFFF",
-            )
+        m = item.metrics
+        mse_str = f"{m.mse:.2f}" if m else "—"
+        psnr_str = f"{m.psnr:.2f} dB" if m else "—"
+        levels_str = f"{m.unique_levels} tons" if m else "—"
 
-            async def _save_single_item(_: ft.ControlEvent, it=item) -> None:
-                if it.quantized_bytes:
-                    try:
-                        save_path = await self._save_picker.save_file(
-                            dialog_title=f"Salvar Imagem Quantizada — {it.filename}",
-                            file_name=f"quantizado_{it.filename}",
-                            allowed_extensions=["png"],
-                            src_bytes=it.quantized_bytes,
-                        )
-                        if save_path and not getattr(self._page, "web", False):
-                            Path(save_path).write_bytes(it.quantized_bytes)
-                        self._show_message(f"✅ Imagem '{it.filename}' salva com sucesso!", theme.SUCCESS)
-                    except Exception as exc:
-                        self._show_message(f"Erro ao salvar {it.filename}: {exc}", theme.ACCENT)
-
-            btn_save = ft.OutlinedButton(
-                content="💾 Baixar",
-                icon=ft.Icons.DOWNLOAD,
-                on_click=_save_single_item,
-            )
-
-            m = item.metrics
-            mse_str = f"{m.mse:.2f}" if m else "—"
-            psnr_str = f"{m.psnr:.2f} dB" if m else "—"
-            levels_str = f"{m.unique_levels} tons" if m else "—"
-
-            item_card = ft.Container(
-                content=ft.Column(
-                    controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Text(f"📄 {item.filename}", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
-                                ft.Text(f"⏱️ {item.elapsed_seconds:.2f}s", size=theme.FONT_CAPTION, color=theme.TEXT_SECONDARY),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        ),
-                        ft.Divider(height=1),
-                        ft.Row(
-                            controls=[
-                                ft.Column(
-                                    controls=[
-                                        ft.Text("Original", size=11, weight=ft.FontWeight.BOLD, color=theme.TEXT_SECONDARY),
-                                        ft.Container(
-                                            content=orig_img,
-                                            on_click=lambda _, it=item: open_zoom_dialog(
-                                                self._page, f"Original — {it.filename}", it.source_bytes
-                                            ),
-                                            ink=True,
-                                            tooltip="Clique para zoom no original",
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Text(f"📄 {item.filename}", weight=ft.FontWeight.BOLD, size=theme.FONT_BODY),
+                            ft.Text(f"⏱️ {item.elapsed_seconds:.2f}s", size=theme.FONT_CAPTION, color=theme.TEXT_SECONDARY),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Divider(height=1),
+                    ft.Row(
+                        controls=[
+                            ft.Column(
+                                controls=[
+                                    ft.Text("Original", size=11, weight=ft.FontWeight.BOLD, color=theme.TEXT_SECONDARY),
+                                    ft.Container(
+                                        content=orig_img,
+                                        on_click=lambda _, it=item: open_zoom_dialog(
+                                            self._page, f"Original — {it.filename}", it.source_bytes
                                         ),
-                                    ],
-                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                ),
-                                ft.Icon(ft.Icons.ARROW_FORWARD, color=theme.PRIMARY_LIGHT, size=20),
-                                ft.Column(
-                                    controls=[
-                                        ft.Text("Quantizada", size=11, weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT),
-                                        ft.Container(
-                                            content=quant_img,
-                                            on_click=lambda _, it=item: open_zoom_dialog(
-                                                self._page, f"Quantizada — {it.filename}", it.quantized_bytes
-                                            ),
-                                            ink=True,
-                                            tooltip="Clique para zoom na quantizada",
+                                        ink=True,
+                                        tooltip="Clique para zoom no original",
+                                    ),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Icon(ft.Icons.ARROW_FORWARD, color=theme.PRIMARY_LIGHT, size=20),
+                            ft.Column(
+                                controls=[
+                                    ft.Text("Quantizada", size=11, weight=ft.FontWeight.BOLD, color=theme.PRIMARY_LIGHT),
+                                    ft.Container(
+                                        content=quant_img,
+                                        on_click=lambda _, it=item: open_zoom_dialog(
+                                            self._page, f"Quantizada — {it.filename}", it.quantized_bytes
                                         ),
-                                    ],
-                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                ),
-                                ft.Column(
-                                    controls=[
-                                        ft.Row(
-                                            controls=[
-                                                theme.metric_badge("MSE", mse_str),
-                                                theme.metric_badge("PSNR", psnr_str, color=theme.SUCCESS),
-                                                theme.metric_badge("Níveis", levels_str),
-                                            ],
-                                            spacing=6,
-                                            wrap=True,
-                                        ),
-                                        ft.Row(
-                                            controls=[btn_zoom, btn_inspect, btn_save],
-                                            spacing=6,
-                                            wrap=True,
-                                        ),
-                                    ],
-                                    spacing=8,
-                                ),
-                            ],
-                            spacing=14,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            wrap=True,
-                        ),
-                    ],
-                    spacing=8,
-                ),
-                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                border_radius=10,
-                padding=12,
-                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft, "Border") else None,
-            )
-            self._results_gallery.controls.append(item_card)
+                                        ink=True,
+                                        tooltip="Clique para zoom na quantizada",
+                                    ),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Row(
+                                        controls=[
+                                            theme.metric_badge("MSE", mse_str),
+                                            theme.metric_badge("PSNR", psnr_str, color=theme.SUCCESS),
+                                            theme.metric_badge("Níveis", levels_str),
+                                        ],
+                                        spacing=6,
+                                        wrap=True,
+                                    ),
+                                    ft.Row(
+                                        controls=[btn_zoom, btn_inspect, btn_save],
+                                        spacing=6,
+                                        wrap=True,
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                        ],
+                        spacing=14,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
+                    ),
+                ],
+                spacing=8,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=10,
+            padding=12,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft, "Border") else None,
+        )
 
-        self._results_gallery_container.visible = bool(self._results_gallery.controls)
-        self._show_message(f"🎉 Lote concluído com sucesso ({result.success_count} imagens quantizadas)!")
-        self._page.update()
+    async def _save_single_item(self, item: BatchItemResult) -> None:
+        """Salva ou faz download do arquivo PNG quantizado de um item específico."""
+        if not item.quantized_bytes:
+            return
+        try:
+            save_path = await self._save_picker.save_file(
+                dialog_title=f"Salvar Imagem Quantizada — {item.filename}",
+                file_name=f"quantizado_{item.filename}",
+                allowed_extensions=["png"],
+                src_bytes=item.quantized_bytes,
+            )
+            if save_path and not getattr(self._page, "web", False):
+                Path(save_path).write_bytes(item.quantized_bytes)
+            self._show_message(f"✅ Imagem '{item.filename}' salva com sucesso!", theme.SUCCESS)
+        except Exception as exc:
+            self._show_message(f"Erro ao salvar {item.filename}: {exc}", theme.ACCENT)
 
     async def _on_download_zip_clicked(self, _: ft.ControlEvent | None = None) -> None:
         """Gera e baixa um arquivo ZIP contendo todas as imagens quantizadas."""

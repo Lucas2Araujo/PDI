@@ -8,8 +8,7 @@ Centraliza a exibição de:
 Totalmente desacoplado para uso tanto na visualização individual quanto no lote.
 """
 
-from typing import Any
-
+from typing import Any, Callable
 import flet as ft
 import numpy as np
 
@@ -25,15 +24,22 @@ from src.ui.common import _bytes_to_data_uri
 # ---------------------------------------------------------------------------
 
 
-def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None) -> None:
+def open_zoom_dialog(
+    page: ft.Page,
+    title: str = "Visualização com Zoom",
+    image_bytes: bytes | str | None = None,
+    on_download: Callable[[], None] | None = None,
+) -> None:
     """
     Abre um pop-up modal (AlertDialog) dedicado para visualização de imagem
-    em alta resolução com ferramentas completas de zoom (0.25× a 10×) e pan.
+    em alta resolução com ferramentas completas de zoom (0.25x a 10x), pan
+    e botão opcional para download direto do arquivo em alta resolução.
 
     Args:
         page: Instância ativa da página Flet.
         title: Título da janela modal de zoom.
         image_bytes: Dados da imagem em bytes PNG ou string Data-URI.
+        on_download: Callback opcional executado para baixar a imagem inspecionada.
     """
     if image_bytes is None:
         return
@@ -100,6 +106,49 @@ def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None)
     dlg_h = min(int(p_h * 0.72), 580)
     is_mob = theme.is_mobile(p_w)
 
+    title_actions: list[ft.Control] = [
+        ft.IconButton(
+            icon=ft.Icons.ZOOM_OUT,
+            icon_size=18 if is_mob else 22,
+            tooltip="Diminuir Zoom (-25%)",
+            on_click=_on_zoom_out,
+        ),
+        ft.Container(
+            content=zoom_label,
+            padding=ft.Padding.symmetric(horizontal=4) if hasattr(ft, "Padding") else 4,
+            alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
+        ),
+        ft.IconButton(
+            icon=ft.Icons.ZOOM_IN,
+            icon_size=18 if is_mob else 22,
+            tooltip="Aumentar Zoom (+25%)",
+            on_click=_on_zoom_in,
+        ),
+        ft.IconButton(
+            icon=ft.Icons.RESTART_ALT,
+            icon_size=18 if is_mob else 22,
+            tooltip="Resetar Zoom (100%)",
+            on_click=_on_zoom_reset,
+        ),
+    ]
+    if on_download is not None:
+        title_actions.append(
+            ft.IconButton(
+                icon=ft.Icons.DOWNLOAD,
+                icon_size=18 if is_mob else 22,
+                tooltip="Baixar Imagem",
+                on_click=lambda _: on_download(),
+            )
+        )
+    title_actions.append(
+        ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_size=18 if is_mob else 22,
+            tooltip="Fechar",
+            on_click=_close_dialog,
+        )
+    )
+
     dialog.title = ft.Row(
         controls=[
             ft.Row(
@@ -117,37 +166,7 @@ def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None)
                 wrap=True,
             ),
             ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ZOOM_OUT,
-                        icon_size=18 if is_mob else 22,
-                        tooltip="Diminuir Zoom (-25%)",
-                        on_click=_on_zoom_out,
-                    ),
-                    ft.Container(
-                        content=zoom_label,
-                        padding=ft.Padding.symmetric(horizontal=4) if hasattr(ft, "Padding") else 4,
-                        alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.ZOOM_IN,
-                        icon_size=18 if is_mob else 22,
-                        tooltip="Aumentar Zoom (+25%)",
-                        on_click=_on_zoom_in,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.RESTART_ALT,
-                        icon_size=18 if is_mob else 22,
-                        tooltip="Resetar Zoom (100%)",
-                        on_click=_on_zoom_reset,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.CLOSE,
-                        icon_size=18 if is_mob else 22,
-                        tooltip="Fechar",
-                        on_click=_close_dialog,
-                    ),
-                ],
+                controls=title_actions,
                 spacing=2,
             ),
         ],
@@ -165,6 +184,27 @@ def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None)
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
     )
 
+    action_buttons: list[ft.Control] = []
+    if on_download is not None:
+        action_buttons.append(
+            ft.Button(
+                content="Baixar Imagem",
+                icon=ft.Icons.DOWNLOAD,
+                on_click=lambda _: on_download(),
+                bgcolor=theme.PRIMARY,
+                color="#FFFFFF",
+            )
+        )
+
+    action_buttons.append(
+        ft.Button(
+            content="Fechar",
+            on_click=_close_dialog,
+            bgcolor=theme.PRIMARY_DARK if on_download is not None else theme.PRIMARY,
+            color="#FFFFFF",
+        )
+    )
+
     dialog.actions = [
         ft.Row(
             controls=[
@@ -172,6 +212,149 @@ def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None)
                     "💡 Dica: Toque/arraste para mover. Use pinch ou botões para zoom."
                     if is_mob
                     else "💡 Dica: Use a roda do mouse ou os botões de zoom acima. Arraste com o cursor para mover a imagem (Pan).",
+                    size=theme.FONT_CAPTION,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                ),
+                ft.Row(controls=action_buttons, spacing=8),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            wrap=True,
+        )
+    ]
+
+    page.show_dialog(dialog)
+    page.update()
+
+
+def open_histogram_zoom_dialog(
+    page: ft.Page,
+    title: str,
+    data: np.ndarray | None,
+    color: str = theme.PRIMARY_LIGHT,
+    is_rgb: bool = False,
+    is_quantized: bool = False,
+    chart_height: int = 340,
+) -> None:
+    """
+    Abre um pop-up modal (AlertDialog) dedicado para visualização e análise
+    estatística em alta resolução do histograma nativo via Flutter Canvas.
+    """
+    if data is None:
+        return
+
+    from src.ui.components.histogram_chart import NativeHistogramChart
+
+    p_w = getattr(page, "width", None) or 800
+    p_h = getattr(page, "height", None) or 600
+    dlg_w = min(int(p_w * 0.92), 960)
+    dlg_h = min(int(p_h * 0.76), 620)
+    is_mob = theme.is_mobile(p_w)
+
+    chart = NativeHistogramChart(
+        title=title,
+        image_or_data=data,
+        color=color,
+        is_rgb=is_rgb,
+        is_quantized=is_quantized,
+        chart_height=chart_height,
+    )
+
+    # Métricas estatísticas adicionais
+    stats_cards: list[ft.Control] = []
+    if isinstance(data, np.ndarray):
+        flat = data.flatten()
+        mean_val = float(np.mean(flat))
+        std_val = float(np.std(flat))
+        min_val = int(np.min(flat))
+        max_val = int(np.max(flat))
+        unique_levels = int(len(np.unique(flat)))
+        total_px = int(flat.size)
+
+        def _stat_item(label: str, val: str) -> ft.Container:
+            return ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text(label, size=10, color=ft.Colors.ON_SURFACE_VARIANT, weight=ft.FontWeight.BOLD),
+                        ft.Text(val, size=13, color=theme.PRIMARY_LIGHT, weight=ft.FontWeight.BOLD),
+                    ],
+                    spacing=2,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6) if hasattr(ft, "Padding") else 6,
+                border_radius=6,
+            )
+
+        stats_cards = [
+            _stat_item("Resolução", f"{total_px:,} px"),
+            _stat_item("Níveis Únicos", str(unique_levels)),
+            _stat_item("Mín / Máx", f"{min_val} / {max_val}"),
+            _stat_item("Média (μ)", f"{mean_val:.1f}"),
+            _stat_item("Desvio (σ)", f"{std_val:.1f}"),
+        ]
+
+    dialog = ft.AlertDialog(
+        modal=True,
+        content_padding=12,
+        title_padding=ft.Padding.only(left=20, top=16, right=16, bottom=8) if hasattr(ft, "Padding") else 16,
+        actions_padding=ft.Padding.only(left=20, right=20, bottom=16) if hasattr(ft, "Padding") else 16,
+    )
+
+    def _close_dialog(_: ft.ControlEvent | None = None) -> None:
+        dialog.open = False
+        page.pop_dialog()
+        page.update()
+
+    dialog.title = ft.Row(
+        controls=[
+            ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.BAR_CHART, size=20 if is_mob else 24, color=theme.PRIMARY_LIGHT),
+                    ft.Text(title, weight=ft.FontWeight.BOLD, size=theme.FONT_TITLE, color=ft.Colors.ON_SURFACE),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            ft.IconButton(
+                icon=ft.Icons.CLOSE,
+                icon_size=18 if is_mob else 22,
+                tooltip="Fechar",
+                on_click=_close_dialog,
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+    stats_row = (
+        ft.Row(controls=stats_cards, spacing=8, wrap=True, alignment=ft.MainAxisAlignment.CENTER)
+        if stats_cards
+        else ft.Container()
+    )
+
+    dialog.content = ft.Container(
+        content=ft.Column(
+            controls=[
+                chart,
+                stats_row,
+            ],
+            spacing=10,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        width=dlg_w,
+        height=dlg_h,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        border_radius=8,
+        padding=8,
+    )
+
+    dialog.actions = [
+        ft.Row(
+            controls=[
+                ft.Text(
+                    "📊 Histograma nativo renderizado em tempo real acelerado via Flutter Canvas.",
                     size=theme.FONT_CAPTION,
                     color=ft.Colors.ON_SURFACE_VARIANT,
                 ),
@@ -198,49 +381,8 @@ def open_zoom_dialog(page: ft.Page, title: str, image_bytes: bytes | str | None)
 # ---------------------------------------------------------------------------
 
 
-def open_inspector_dialog(
-    page: ft.Page,
-    raw_image: np.ndarray,
-    gray_image: np.ndarray,
-    quantized_image: np.ndarray,
-    bits: int,
-    technique: QuantizationTechnique | str,
-    method: GrayscaleMethod,
-) -> None:
-    """
-    Abre o modal didático de telemetria completa com 4 abas didáticas:
-    1. Estrutura Matricial Original (Amostra central 5×5)
-    2. Aritmética da Conversão para Tons de Cinza (Equações detalhadas)
-    3. Tabela de Quantização e Centróides (Intervalos de decisão completos)
-    4. Auditoria de Erro Residual e Mapa de Calor com suporte a Zoom.
-    """
-    telemetry = extract_pipeline_telemetry(
-        raw_image=raw_image,
-        gray_image=gray_image,
-        quantized_image=quantized_image,
-        bits=bits,
-        technique=technique,
-        method=method,
-    )
-
-    p_w = getattr(page, "width", None) or 800
-    p_h = getattr(page, "height", None) or 600
-    dlg_w = min(int(p_w * 0.95), 1050)
-    dlg_h = min(int(p_h * 0.85), 680)
-    is_mob = theme.is_mobile(p_w)
-
-    dialog = ft.AlertDialog(
-        modal=True,
-        content_padding=ft.Padding.all(12) if hasattr(ft, "Padding") else 12,
-        actions_padding=ft.Padding.all(10) if hasattr(ft, "Padding") else 10,
-    )
-
-    def _close_dialog(_: ft.ControlEvent | None = None) -> None:
-        dialog.open = False
-        page.pop_dialog()
-        page.update()
-
-    # ── Aba 1: Matriz de Entrada ──────────────────────────────────────────
+def _build_matrix_tab(telemetry) -> ft.Container:
+    """Constrói a Aba 1: Estrutura Matricial da Imagem Digital."""
     sample_rows = []
     s_r, s_c = telemetry.sample_coords
     for r_idx in range(telemetry.sample_gray.shape[0]):
@@ -274,7 +416,7 @@ def open_inspector_dialog(
         data_row_max_height=38,
     )
 
-    tab1_content = ft.Container(
+    return ft.Container(
         content=ft.Column(
             controls=[
                 ft.Text("1. Estrutura Matricial da Imagem Digital", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE, color=theme.PRIMARY_LIGHT),
@@ -299,11 +441,13 @@ def open_inspector_dialog(
         padding=10,
     )
 
-    # ── Aba 2: Matemática da Conversão ────────────────────────────────────
+
+def _build_arithmetic_tab(telemetry) -> ft.Container:
+    """Constrói a Aba 2: Matemática e Aritmética da Conversão para Tons de Cinza."""
     calc_items = [
         ft.Text(calc, size=12, font_family="monospace") for calc in telemetry.pixel_calculations[:25]
     ]
-    tab2_content = ft.Container(
+    return ft.Container(
         content=ft.Column(
             controls=[
                 ft.Text("2. Aritmética da Conversão para Tons de Cinza", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE, color=theme.PRIMARY_LIGHT),
@@ -328,7 +472,9 @@ def open_inspector_dialog(
         padding=10,
     )
 
-    # ── Aba 3: Mecânica de Quantização ────────────────────────────────────
+
+def _build_quant_table_tab(telemetry) -> ft.Container:
+    """Constrói a Aba 3: Particionamento e Tabela de Mapeamento dos Níveis."""
     q_rows = []
     for r_dict in telemetry.quant_info.table_rows:
         if "range" in r_dict and "reconstruction" in r_dict:
@@ -364,13 +510,13 @@ def open_inspector_dialog(
         data_row_max_height=42,
     )
 
-    tab3_content = ft.Container(
+    step_info_str = f" · Tamanho do Passo (Δ): {telemetry.quant_info.step_size}" if telemetry.quant_info.step_size else ""
+    return ft.Container(
         content=ft.Column(
             controls=[
                 ft.Text(f"3. Particionamento e Níveis — {telemetry.quantization_technique_name}", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE, color=theme.PRIMARY_LIGHT),
                 ft.Text(
-                    f"Resolução: {telemetry.bits} bits · Níveis de Saída (L = 2^b): {telemetry.n_levels} tons" +
-                    (f" · Tamanho do Passo (Δ): {telemetry.quant_info.step_size}" if telemetry.quant_info.step_size else ""),
+                    f"Resolução: {telemetry.bits} bits · Níveis de Saída (L = 2^b): {telemetry.n_levels} tons{step_info_str}",
                     size=theme.FONT_BODY,
                 ),
                 ft.Divider(height=1),
@@ -387,21 +533,20 @@ def open_inspector_dialog(
         padding=10,
     )
 
-    # ── Aba 4: Auditoria de Erro e Mapa de Calor ──────────────────────────
+
+def _build_heatmap_tab(page: ft.Page, telemetry) -> ft.Container:
+    """Constrói a Aba 4: Auditoria de Erro Residual e Mapa de Calor."""
     heatmap_img = ft.Image(
         src=_bytes_to_data_uri(telemetry.heatmap_bytes),
         fit=getattr(ft.BoxFit, "CONTAIN", None) if hasattr(ft, "BoxFit") else None,
         expand=True,
     )
 
+    title_str = "4. Auditoria de Erro Residual — Mapa de Calor (Heatmap)"
     btn_heatmap_zoom = ft.Button(
         content="🔍 Ampliar Mapa de Calor",
         icon=ft.Icons.ZOOM_IN,
-        on_click=lambda _: open_zoom_dialog(
-            page,
-            "4. Auditoria de Erro Residual — Mapa de Calor (Heatmap)",
-            telemetry.heatmap_bytes,
-        ),
+        on_click=lambda _: open_zoom_dialog(page, title_str, telemetry.heatmap_bytes),
         bgcolor=theme.PRIMARY,
         color="#FFFFFF",
     )
@@ -413,16 +558,12 @@ def open_inspector_dialog(
         border_radius=8,
         padding=6,
         alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
-        on_click=lambda _: open_zoom_dialog(
-            page,
-            "4. Auditoria de Erro Residual — Mapa de Calor (Heatmap)",
-            telemetry.heatmap_bytes,
-        ),
+        on_click=lambda _: open_zoom_dialog(page, title_str, telemetry.heatmap_bytes),
         ink=True,
         tooltip="Clique para abrir o mapa de calor no visualizador com zoom",
     )
 
-    tab4_content = ft.Container(
+    return ft.Container(
         content=ft.Column(
             controls=[
                 ft.Text("4. Auditoria de Erro Residual e Análise Termográfica", weight=ft.FontWeight.BOLD, size=theme.FONT_SUBTITLE, color=theme.PRIMARY_LIGHT),
@@ -469,6 +610,54 @@ def open_inspector_dialog(
         ),
         padding=10,
     )
+
+
+def open_inspector_dialog(
+    page: ft.Page,
+    raw_image: np.ndarray,
+    gray_image: np.ndarray,
+    quantized_image: np.ndarray,
+    bits: int,
+    technique: QuantizationTechnique | str,
+    method: GrayscaleMethod,
+) -> None:
+    """
+    Abre o modal didático de telemetria completa com 4 abas didáticas:
+    1. Estrutura Matricial Original (Amostra central 5×5)
+    2. Aritmética da Conversão para Tons de Cinza (Equações detalhadas)
+    3. Tabela de Quantização e Centróides (Intervalos de decisão completos)
+    4. Auditoria de Erro Residual e Mapa de Calor com suporte a Zoom.
+    """
+    telemetry = extract_pipeline_telemetry(
+        raw_image=raw_image,
+        gray_image=gray_image,
+        quantized_image=quantized_image,
+        bits=bits,
+        technique=technique,
+        method=method,
+    )
+
+    p_w = getattr(page, "width", None) or 800
+    p_h = getattr(page, "height", None) or 600
+    dlg_w = min(int(p_w * 0.95), 1050)
+    dlg_h = min(int(p_h * 0.85), 680)
+    is_mob = theme.is_mobile(p_w)
+
+    dialog = ft.AlertDialog(
+        modal=True,
+        content_padding=ft.Padding.all(12) if hasattr(ft, "Padding") else 12,
+        actions_padding=ft.Padding.all(10) if hasattr(ft, "Padding") else 10,
+    )
+
+    def _close_dialog(_: ft.ControlEvent | None = None) -> None:
+        dialog.open = False
+        page.pop_dialog()
+        page.update()
+
+    tab1_content = _build_matrix_tab(telemetry)
+    tab2_content = _build_arithmetic_tab(telemetry)
+    tab3_content = _build_quant_table_tab(telemetry)
+    tab4_content = _build_heatmap_tab(page, telemetry)
 
     inspector_tabs = ft.Tabs(
         selected_index=0,
@@ -540,3 +729,4 @@ def open_inspector_dialog(
 
     page.show_dialog(dialog)
     page.update()
+

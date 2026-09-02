@@ -10,9 +10,8 @@ Referências:
 """
 
 from enum import Enum, auto
-
+import gc
 import numpy as np
-
 
 
 class GrayscaleMethod(Enum):
@@ -27,7 +26,7 @@ class GrayscaleMethod(Enum):
 
 # Pesos de luminância perceptual definidos pelo padrão ITU-R BT.601 (NTSC)
 # O olho humano é mais sensível ao verde (~58.7%), depois vermelho (~29.9%) e azul (~11.4%)
-_LUMINANCE_WEIGHTS = np.array([0.2989, 0.5870, 0.1140], dtype=np.float64)
+_LUMINANCE_WEIGHTS = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
 
 
 def to_grayscale(image: np.ndarray, method: GrayscaleMethod = GrayscaleMethod.LUMINANCE) -> np.ndarray:
@@ -59,21 +58,25 @@ def to_grayscale(image: np.ndarray, method: GrayscaleMethod = GrayscaleMethod.LU
     # Remove canal Alpha (RGBA → RGB) antes de processar
     rgb = _strip_alpha(image)
 
-    # Normaliza para float64 em [0.0, 1.0] para os cálculos intermediários
-    rgb_float = rgb.astype(np.float64) / 255.0 if rgb.dtype == np.uint8 else rgb.astype(np.float64)
+    # Normaliza para float32 em [0.0, 1.0] para cálculos intermediários com metade do consumo de RAM
+    rgb_float = rgb.astype(np.float32) / 255.0 if rgb.dtype == np.uint8 else rgb.astype(np.float32)
 
-    if method == GrayscaleMethod.LUMINANCE:
-        return _convert_luminance(rgb_float)
-    if method == GrayscaleMethod.AVERAGE:
-        return _convert_average(rgb_float)
-    if method == GrayscaleMethod.CHANNEL_R:
-        return _extract_channel(rgb_float, channel=0)
-    if method == GrayscaleMethod.CHANNEL_G:
-        return _extract_channel(rgb_float, channel=1)
-    if method == GrayscaleMethod.CHANNEL_B:
-        return _extract_channel(rgb_float, channel=2)
+    try:
+        if method == GrayscaleMethod.LUMINANCE:
+            return _convert_luminance(rgb_float)
+        if method == GrayscaleMethod.AVERAGE:
+            return _convert_average(rgb_float)
+        if method == GrayscaleMethod.CHANNEL_R:
+            return _extract_channel(rgb_float, channel=0)
+        if method == GrayscaleMethod.CHANNEL_G:
+            return _extract_channel(rgb_float, channel=1)
+        if method == GrayscaleMethod.CHANNEL_B:
+            return _extract_channel(rgb_float, channel=2)
 
-    raise ValueError(f"Método de conversão desconhecido: {method}")
+        raise ValueError(f"Método de conversão desconhecido: {method}")
+    finally:
+        del rgb_float
+        gc.collect()
 
 
 def is_channel_isolation(method: GrayscaleMethod) -> bool:
@@ -245,8 +248,7 @@ def _extract_channel(rgb_float: np.ndarray, channel: int) -> np.ndarray:
     Extrai e retorna um único canal de cor como imagem em escala de cinza.
 
     Args:
-        rgb_float: Array float64 (H, W, 3) normalizado em [0.0, 1.0].
+        rgb_float: Array float32 (H, W, 3) normalizado em [0.0, 1.0].
         channel: Índice do canal (0=R, 1=G, 2=B).
     """
     return (rgb_float[:, :, channel] * 255).round().astype(np.uint8)
-

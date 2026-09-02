@@ -10,6 +10,7 @@ Ponto de entrada da UI chamado por main.py.
 """
 
 from pathlib import Path
+from typing import Callable
 
 import flet as ft
 
@@ -18,7 +19,7 @@ from src.ui.views.batch_view import BatchView
 from src.ui.views.single_view import SingleView
 
 # Versão atual do aplicativo
-APP_VERSION = "0.3"
+APP_VERSION = "0.4"
 APP_TITLE = "PDI — Quantização de Imagens"
 
 
@@ -255,7 +256,7 @@ def _build_brand_section(
     )
 
 
-def _build_header(page: ft.Page) -> tuple[ft.Container, any]:
+def _build_header(page: ft.Page) -> tuple[ft.Container, Callable[[float | None], None]]:
     """
     Constrói a barra de cabeçalho da aplicação com logo oficial, título,
     badge de versão e seletor interativo de tema, com suporte a layout responsivo.

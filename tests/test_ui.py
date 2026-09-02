@@ -13,7 +13,7 @@ class TestUIConfig(unittest.TestCase):
     """Suíte de testes para metadados e configuração da aplicação."""
 
     def test_app_version(self) -> None:
-        self.assertEqual(APP_VERSION, "0.3")
+        self.assertEqual(APP_VERSION, "0.4")
 
     def test_app_title_present(self) -> None:
         self.assertTrue(len(APP_TITLE) > 0)
@@ -271,8 +271,222 @@ class TestViewsInstantiation(unittest.TestCase):
             self.assertIn("quantizado_foto1.png", zf.namelist())
             self.assertEqual(zf.read("quantizado_foto1.png"), b"fake_png_data")
 
+    def test_open_histogram_zoom_dialog_and_callbacks(self) -> None:
+        from unittest.mock import MagicMock
+        import numpy as np
+        from src.ui.dialogs import open_histogram_zoom_dialog
+        from src.ui.views.single_view import SingleView
+
+        mock_page = MagicMock(spec=ft.Page)
+        mock_page.services = None
+        mock_page.show_dialog = MagicMock()
+        mock_page.update = MagicMock()
+
+        test_data = np.arange(256, dtype=np.uint8).reshape((16, 16))
+        open_histogram_zoom_dialog(
+            page=mock_page,
+            title="Teste Histograma Zoom",
+            data=test_data,
+        )
+
+        mock_page.show_dialog.assert_called_once()
+        dialog = mock_page.show_dialog.call_args[0][0]
+        self.assertIsInstance(dialog, ft.AlertDialog)
+
+        sv = SingleView(mock_page)
+        sv._gray_image = test_data
+        sv._quantized_image = test_data
+        sv._open_orig_chart_zoom()
+        self.assertEqual(mock_page.show_dialog.call_count, 2)
+        sv._open_quant_chart_zoom()
+        self.assertEqual(mock_page.show_dialog.call_count, 3)
+
+    def test_unified_analytical_figure_display_and_zoom(self) -> None:
+        from unittest.mock import MagicMock
+        from src.ui.views.single_view import SingleView
+
+        mock_page = MagicMock(spec=ft.Page)
+        mock_page.services = None
+        mock_page.show_dialog = MagicMock()
+        mock_page.update = MagicMock()
+
+        sv = SingleView(mock_page)
+        fake_figure_bytes = b"\x89PNG\r\n\x1a\nfake_figure_bytes"
+
+        sv._figure_bytes = fake_figure_bytes
+        sv._color_figure_bytes = fake_figure_bytes
+
+        # Teste de exibição do modo Gráfico Cinza
+        sv._display_graph_mode("Uniforme", "Luminância")
+        self.assertTrue(sv._graph_container.visible)
+        self.assertIn("data:image/png;base64,", sv._graph_display_image.src)
+
+        # Teste de abertura de zoom na figura unificada
+        sv._open_graph_figure_zoom()
+        mock_page.show_dialog.assert_called_once()
+        dialog = mock_page.show_dialog.call_args[0][0]
+        self.assertIsInstance(dialog, ft.AlertDialog)
+
+    def test_view_mode_buttons_and_triple_grid_color_mode(self) -> None:
+        from unittest.mock import MagicMock
+        from src.ui.views.single_view import SingleView
+
+        mock_page = MagicMock(spec=ft.Page)
+        mock_page.services = None
+        mock_page.update = MagicMock()
+
+        sv = SingleView(mock_page)
+
+        # 1. Modo Grayscale padrão
+        self.assertTrue(sv._convert_to_gray)
+        segment_values = [s.value for s in sv._view_mode_buttons.segments]
+        self.assertNotIn("side_by_side", segment_values)
+        self.assertIn("color_side", segment_values)
+        self.assertIn("triple", segment_values)
+
+        # 2. Alterna para Modo Colorido (RGB)
+        sv._convert_to_gray = False
+        sv._update_view_mode_buttons()
+        color_seg_values = [s.value for s in sv._view_mode_buttons.segments]
+        self.assertNotIn("side_by_side", color_seg_values)
+        self.assertNotIn("color_graph", color_seg_values)
+        self.assertIn("graph", color_seg_values)
+        self.assertIn("triple", color_seg_values)
+
+        # Verifica label da Grade Tripla no modo colorido
+        triple_seg = next(s for s in sv._view_mode_buttons.segments if s.value == "triple")
+        self.assertIn("Original × RGB × Cinza", triple_seg.label.value)
+
+        # 3. Testa Grade Tripla no modo colorido com imagem RGB
+        fake_png = b"\x89PNG\r\n\x1a\nfake"
+        sv._color_image_bytes = fake_png
+        sv._quantized_image_bytes = fake_png
+        sv._gray_quantized_bytes = fake_png
+        sv._display_triple_mode(t_name="K-Means", m_name="Luminância")
+
+        self.assertTrue(sv._triple_container.visible)
+        self.assertEqual(sv._triple_color_label.value, "1. Original Colorida (RGB)")
+        self.assertIn("2. Quantizada com Cores", sv._triple_gray_label.value)
+        self.assertIn("3. Quantizada em Tons de Cinza", sv._triple_quant_label.value)
+
+def _create_mock_page():
+    from unittest.mock import MagicMock
+    mock_page = MagicMock(spec=ft.Page)
+    mock_page.services = None
+    mock_page.show_dialog = MagicMock()
+    mock_page.update = MagicMock()
+    return mock_page
+
+
+from src.ui.views.single_view import SingleView
+
+
+class TestDynamicTabsAndZipExport(unittest.TestCase):
+    """Testes para abas dinâmicas, exportação ZIP de comparações e seletor de algoritmo."""
+
+    def test_dynamic_algorithm_tabs_both_technique(self):
+        page = _create_mock_page()
+        sv = SingleView(page)
+        sv._selected_technique_key = "BOTH"
+        sv._bits_value = 4
+        sv._update_view_mode_buttons()
+
+        segment_values = [s.value for s in sv._view_mode_buttons.segments]
+        self.assertIn("side_unif_kmeans", segment_values)
+        self.assertIn("orig_uniform", segment_values)
+        self.assertIn("orig_kmeans", segment_values)
+
+        seg_side = next(s for s in sv._view_mode_buttons.segments if s.value == "side_unif_kmeans")
+        self.assertIn("Uniforme × K-Means (4b)", seg_side.label.value)
+
+    def test_zip_generation_and_report(self):
+        import zipfile
+        import io
+        from pathlib import Path
+        page = _create_mock_page()
+        sv = SingleView(page)
+        sv._source_path = Path("/tmp/foto_teste.png")
+        sv._bits_value = 3
+        sv._selected_technique_key = "BOTH"
+
+        fake_png = b"\x89PNG\r\n\x1a\nfake"
+        sv._color_image_bytes = fake_png
+        sv._gray_image_bytes = fake_png
+        sv._direct_quantized_bytes = fake_png
+        sv._quantized_image_bytes = fake_png
+        sv._dither_image_bytes = fake_png
+        sv._figure_bytes = fake_png
+
+        from src.core.histogram import ImageMetrics
+        sv._direct_metrics = ImageMetrics(mse=12.5, psnr=37.16, unique_levels=8, bits=3)
+        sv._kmeans_metrics = ImageMetrics(mse=8.2, psnr=38.99, unique_levels=8, bits=3)
+
+        # Testa banner de execução
+        sv._update_execution_summary()
+        self.assertTrue(sv._execution_summary_card.visible)
+        self.assertFalse(sv._btn_download_all_zip.disabled)
+        self.assertTrue(sv._btn_quick_zip.visible)
+
+        # Testa geração do arquivo ZIP
+        zip_data, zip_filename = sv._generate_comparison_zip_bytes()
+        self.assertEqual(zip_filename, "foto_teste_comparações_3bits.zip")
+
+        with zipfile.ZipFile(io.BytesIO(zip_data), "r") as zf:
+            namelist = zf.namelist()
+            self.assertIn("1_original_foto_teste_colorida_rgb.png", namelist)
+            self.assertIn("3_quantizada_uniforme_3bits.png", namelist)
+            self.assertIn("4_quantizada_kmeans_3bits.png", namelist)
+            self.assertIn("5_quantizada_floyd_steinberg_3bits.png", namelist)
+            self.assertIn("painel_analitico_histogramas_3bits.png", namelist)
+            self.assertIn("relatorio_metricas.txt", namelist)
+
+            report = zf.read("relatorio_metricas.txt").decode("utf-8")
+            self.assertIn("RELATÓRIO TÉCNICO DE PROCESSAMENTO", report)
+            self.assertIn("37.16 dB", report)
+            self.assertIn("38.99 dB", report)
+
+        # Testa chamada assíncrona com array NumPy para prevenir erro de verdade ambígua
+        import asyncio
+        from unittest.mock import AsyncMock
+        import numpy as np
+        sv._raw_image = np.zeros((32, 32, 3), dtype=np.uint8)
+        saved_zip = {}
+
+        async def fake_save_zip(**kwargs):
+            saved_zip.update(kwargs)
+            return "teste.zip"
+
+        sv._save_picker.save_file = AsyncMock(side_effect=fake_save_zip)
+        asyncio.run(sv._on_download_all_zip(None))
+        self.assertIn("src_bytes", saved_zip)
+        self.assertIsInstance(saved_zip["src_bytes"], bytes)
+
+    def test_single_algo_switcher(self):
+        page = _create_mock_page()
+        sv = SingleView(page)
+        sv._selected_technique_key = "BOTH"
+        sv._bits_value = 2
+        fake_png_u = b"\x89PNG\r\n\x1a\nfake_unif"
+        fake_png_k = b"\x89PNG\r\n\x1a\nfake_km"
+        sv._direct_quantized_bytes = fake_png_u
+        sv._quantized_image_bytes = fake_png_k
+
+        # Default é kmeans
+        bytes_km, name_km = sv._get_active_single_bytes_and_name()
+        self.assertEqual(bytes_km, fake_png_k)
+        self.assertIn("kmeans_2bits.png", name_km)
+
+        # Troca para uniforme
+        sv._active_single_algo = "uniform"
+        bytes_u, name_u = sv._get_active_single_bytes_and_name()
+        self.assertEqual(bytes_u, fake_png_u)
+        self.assertIn("uniforme_2bits.png", name_u)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
 
 
