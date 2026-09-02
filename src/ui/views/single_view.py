@@ -664,7 +664,7 @@ class SingleView(ft.Column):
                     ),
                     ft.Segment(
                         value="triple",
-                        label=ft.Text(f"Grade Tripla (Orig × {t_short} RGB × Cinza)", size=theme.FONT_CAPTION),
+                        label=ft.Text("Grade Tripla (Original × RGB × Cinza)", size=theme.FONT_CAPTION),
                         icon=ft.Icon(ft.Icons.VIEW_COLUMN),
                     ),
                     ft.Segment(
@@ -1504,24 +1504,39 @@ class SingleView(ft.Column):
             lines.append(f"[{name_dir}]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._direct_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._direct_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._direct_metrics.num_levels}")
-            lines.append(f"  • Tempo de Processamento       : {self._direct_metrics.processing_time_ms:.1f} ms")
+            n_levels = getattr(self._direct_metrics, "unique_levels", getattr(self._direct_metrics, "num_levels", "—"))
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {n_levels}")
+            proc_time = getattr(self._direct_metrics, "processing_time_ms", None)
+            if proc_time is not None:
+                lines.append(f"  • Tempo de Processamento       : {proc_time:.1f} ms")
+            elif hasattr(self, "_badge_time") and self._badge_time.content.controls[1].value not in ("—", ""):
+                lines.append(f"  • Tempo de Processamento       : {self._badge_time.content.controls[1].value}")
             lines.append("")
 
         if self._kmeans_metrics is not None:
             lines.append("[Quantização Adaptativa K-Means]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._kmeans_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._kmeans_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._kmeans_metrics.num_levels}")
-            lines.append(f"  • Tempo de Processamento       : {self._kmeans_metrics.processing_time_ms:.1f} ms")
+            n_levels_km = getattr(self._kmeans_metrics, "unique_levels", getattr(self._kmeans_metrics, "num_levels", "—"))
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {n_levels_km}")
+            proc_time_km = getattr(self._kmeans_metrics, "processing_time_ms", None)
+            if proc_time_km is not None:
+                lines.append(f"  • Tempo de Processamento       : {proc_time_km:.1f} ms")
+            elif hasattr(self, "_badge_time") and self._badge_time.content.controls[1].value not in ("—", ""):
+                lines.append(f"  • Tempo de Processamento       : {self._badge_time.content.controls[1].value}")
             lines.append("")
 
         if self._dither_metrics is not None:
             lines.append("[Aprimoramento com Floyd-Steinberg (Dithering)]")
             lines.append(f"  • MSE  (Erro Quadrático Médio) : {self._dither_metrics.mse:.4f}")
             lines.append(f"  • PSNR (Relação Sinal-Ruído)  : {self._dither_metrics.psnr:.2f} dB")
-            lines.append(f"  • Níveis Efetivos de Cores/Tons: {self._dither_metrics.num_levels}")
-            lines.append(f"  • Tempo de Processamento       : {self._dither_metrics.processing_time_ms:.1f} ms")
+            n_levels_dit = getattr(self._dither_metrics, "unique_levels", getattr(self._dither_metrics, "num_levels", "—"))
+            lines.append(f"  • Níveis Efetivos de Cores/Tons: {n_levels_dit}")
+            proc_time_dit = getattr(self._dither_metrics, "processing_time_ms", None)
+            if proc_time_dit is not None:
+                lines.append(f"  • Tempo de Processamento       : {proc_time_dit:.1f} ms")
+            elif hasattr(self, "_badge_time") and self._badge_time.content.controls[1].value not in ("—", ""):
+                lines.append(f"  • Tempo de Processamento       : {self._badge_time.content.controls[1].value}")
             lines.append("")
 
         lines.extend([
@@ -1539,7 +1554,7 @@ class SingleView(ft.Column):
 
     async def _on_download_all_zip(self, _: ft.ControlEvent | None = None) -> None:
         """Abre o FilePicker para salvar o pacote ZIP com todas as comparações geradas."""
-        if not self._raw_image and not self._loaded_array and not self._input_image_bytes:
+        if self._raw_image is None and self._loaded_array is None and not self._input_image_bytes:
             self._show_message("Execute o processamento de uma imagem antes de baixar o pacote.", theme.WARNING)
             return
 

@@ -41,6 +41,11 @@ class ImageMetrics:
     unique_levels: int
     bits: int
 
+    @property
+    def num_levels(self) -> int:
+        """Alias de compatibilidade para unique_levels."""
+        return self.unique_levels
+
 
 @dataclass(frozen=True)
 class HistogramData:
