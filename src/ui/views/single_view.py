@@ -1903,30 +1903,6 @@ class SingleView(ft.Column):
         else:
             threading.Thread(target=self._run_processing, daemon=True).start()
 
-    async def _on_save(self, _: ft.ControlEvent) -> None:
-        """Abre o FilePicker para salvar o resultado ativo no disco ou download na web."""
-        if self._source_path is None and self._loaded_array is None:
-            return
-
-        stem = self._source_path.stem if self._source_path else "imagem"
-        data_to_save, default_name = self._get_active_single_bytes_and_name()
-        if data_to_save is None:
-            data_to_save = self._quantized_image_bytes or self._gray_image_bytes
-            default_name = f"{stem}_quantizada_{self._bits_value}bits.png"
-
-        try:
-            save_path = await self._save_picker.save_file(
-                dialog_title="Salvar Imagem Quantizada",
-                file_name=default_name,
-                allowed_extensions=["png"],
-                src_bytes=data_to_save,
-            )
-            if save_path and not getattr(self._page, "web", False):
-                Path(save_path).write_bytes(data_to_save)
-            self._show_message(f"✅ Arquivo '{default_name}' salvo com sucesso!", theme.SUCCESS)
-        except Exception as exc:
-            self._show_message(f"Erro ao salvar arquivo: {exc}", theme.ACCENT)
-
     # -----------------------------------------------------------------------
     # Lógica de Processamento Assíncrono Modularizada
     # -----------------------------------------------------------------------
