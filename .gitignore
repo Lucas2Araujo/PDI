@@ -19,6 +19,8 @@ teste_cinza*.jpg
 *_comparativo_*.png
 *_cinza_manual.jpg
 comparacao_histogramas_*.png
+saida_*.png
+*lote_resultado/
 
 # IDEs e editores
 .vscode/

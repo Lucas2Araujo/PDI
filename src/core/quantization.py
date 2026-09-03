@@ -220,23 +220,17 @@ def quantize_kmeans(
 
     _validate_image(image)
 
-    # Carrega classe de K-Means sob demanda
-    if use_minibatch:
+    # -------------------------------------------------------------------------
         ClusterClass = get_minibatch_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
     else:
         ClusterClass = get_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
 
-    # Prepara matriz de pixels (N_pixels, 1) para 2D cinza ou (N_pixels, 3) para 3D RGB
-    is_3d = (image.ndim == 3)
-    pixels = image.reshape(-1, 3 if is_3d else 1).astype(np.float32)
-
-    # Se a quantidade de pixels únicos for menor que k, ajusta k
+    pixels = image.reshape(-1, 3).astype(np.float32)
     num_samples = pixels.shape[0]
     effective_k = min(k, num_samples)
 
     try:
         if use_minibatch:
-            batch_size = min(2048, max(256, num_samples // 10))
             cluster_model = ClusterClass(
                 n_clusters=effective_k,
                 random_state=random_state,

@@ -32,10 +32,10 @@ python scripts/uniforme.py <caminho_da_imagem> <bits>
 
 **Exemplo:**
 ```bash
-python scripts/uniforme.py teste.png 4
+python scripts/uniforme.py assets/sample_portrait.png 4
 ```
 
-Gera: `teste_uniforme_4bits.png` — Reconstrução calculada no centróide ótimo de cada intervalo.
+Gera: `sample_portrait_uniforme_4bits.png` — Reconstrução calculada no centróide ótimo de cada intervalo.
 
 ---
 
@@ -47,10 +47,10 @@ python scripts/quantiza_nao_uniforme.py <caminho_da_imagem> <bits>
 
 **Exemplo:**
 ```bash
-python scripts/quantiza_nao_uniforme.py teste.png 4
+python scripts/quantiza_nao_uniforme.py assets/sample_portrait.png 4
 ```
 
-Gera: `teste_kmeans_4bits.png`
+Gera: `sample_portrait_kmeans_4bits.png`
 
 > **Atenção**: O K-Means pode demorar alguns segundos em imagens grandes.
 
@@ -64,10 +64,10 @@ python scripts/histograma_comparativo.py <caminho_da_imagem> <bits>
 
 **Exemplo:**
 ```bash
-python scripts/histograma_comparativo.py teste.png 4
+python scripts/histograma_comparativo.py assets/sample_portrait.png 4
 ```
 
-Gera: `teste_comparativo_4bits.png` — Grade 2×3 com as 3 imagens e seus histogramas.
+Gera: `sample_portrait_comparativo_4bits.png` — Grade 2×3 com as 3 imagens e seus histogramas.
 Também exibe as métricas **MSE** e **PSNR** no terminal.
 
 ---
@@ -80,10 +80,10 @@ python scripts/grayscale_manual.py <caminho_da_imagem>
 
 **Exemplo:**
 ```bash
-python scripts/grayscale_manual.py teste.png
+python scripts/grayscale_manual.py assets/sample_portrait.png
 ```
 
-Gera: `teste_cinza_manual.jpg`
+Gera: `sample_portrait_cinza_manual.jpg`
 
 Demonstração didática da fórmula ITU-R BT.601 implementada pixel a pixel com Pillow.
 

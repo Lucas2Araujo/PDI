@@ -245,6 +245,21 @@ class TestQuantizeKMeans(unittest.TestCase):
         with self.assertRaises(ValueError):
             quantize_kmeans(self.synthetic, bits=10)
 
+    def test_kmeans_1d_few_unique_values_edge_case(self) -> None:
+        """Garante que imagens com menos tons únicos que clusters não lançam exceção."""
+        flat_img = np.array([[10, 50], [50, 10]], dtype=np.uint8)  # apenas 2 tons únicos
+        # Solicita 3 bits (8 clusters) para apenas 2 valores únicos
+        quantized = quantize_kmeans(flat_img, bits=3)
+        self.assertEqual(quantized.shape, flat_img.shape)
+        self.assertEqual(quantized.dtype, np.uint8)
+        self.assertLessEqual(len(np.unique(quantized)), 2)
+
+    def test_kmeans_1d_lut_consistency(self) -> None:
+        """Verifica se pixels idênticos são mapeados ao mesmo centróide via LUT."""
+        img = np.full((10, 10), 128, dtype=np.uint8)
+        quantized = quantize_kmeans(img, bits=2)
+        self.assertEqual(len(np.unique(quantized)), 1)
+
 
 class TestQuantizeHistogram(unittest.TestCase):
     """Suíte de testes para quantização baseada em histograma."""
