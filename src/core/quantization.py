@@ -33,6 +33,76 @@ _KMEANS_CLASS = None
 _MINIBATCH_KMEANS_CLASS = None
 
 
+def _quantize_kmeans_1d(
+    image: np.ndarray,
+    bits: int = 4,
+    n_clusters: int | None = None,
+    random_state: int = 42,
+    max_iter: int = 50,
+    tol: float = 1e-3,
+) -> np.ndarray:
+    """
+    Quantização K-Means 1D ultra-rápida baseada na distribuição de frequências (histograma).
+
+    Em imagens em escala de cinza de 8 bits, existem no máximo 256 níveis únicos de intensidade.
+    Esta função executa o K-Means ponderado diretamente sobre os valores únicos e suas contagens,
+    convergindo em milissegundos e mapeando a imagem completa via Look-Up Table (LUT).
+    """
+    k = 2 ** bits if n_clusters is None else n_clusters
+    unique_vals, weights = np.unique(image, return_counts=True)
+    n_unique = len(unique_vals)
+
+    if n_unique <= k:
+        all_vals = np.arange(256, dtype=np.float32)
+        dists = np.abs(all_vals[:, None] - unique_vals.astype(np.float32)[None, :])
+        lut = unique_vals[np.argmin(dists, axis=1)].astype(np.uint8)
+        return lut[image]
+
+    effective_k = min(k, n_unique)
+    unique_vals_f = unique_vals.astype(np.float32)
+    weights_f = weights.astype(np.float32)
+
+    # Inicialização K-Means++ ponderada determinística
+    rng = np.random.default_rng(random_state)
+    probs = weights_f / np.sum(weights_f)
+    centers = np.empty(effective_k, dtype=np.float32)
+    first_idx = rng.choice(n_unique, p=probs)
+    centers[0] = unique_vals_f[first_idx]
+    closest_dist_sq = (unique_vals_f - centers[0]) ** 2
+
+    for c in range(1, effective_k):
+        combined = closest_dist_sq * weights_f
+        s = float(np.sum(combined))
+        p_c = (combined / s) if s > 0 else probs
+        chosen = rng.choice(n_unique, p=p_c)
+        centers[c] = unique_vals_f[chosen]
+        closest_dist_sq = np.minimum(closest_dist_sq, (unique_vals_f - centers[c]) ** 2)
+
+    # Iterações de Lloyd ponderadas vetorizadas
+    for _ in range(max_iter):
+        dists = np.abs(unique_vals_f[:, None] - centers[None, :])
+        labels = np.argmin(dists, axis=1)
+
+        b_weights = np.bincount(labels, weights=weights_f, minlength=effective_k)
+        b_sums = np.bincount(labels, weights=unique_vals_f * weights_f, minlength=effective_k)
+
+        active = b_weights > 0
+        new_centers = centers.copy()
+        new_centers[active] = b_sums[active] / b_weights[active]
+
+        if float(np.max(np.abs(new_centers - centers))) < tol:
+            centers = new_centers
+            break
+        centers = new_centers
+
+    # Mapeamento instantâneo via LUT de 256 bytes
+    all_vals = np.arange(256, dtype=np.float32)
+    dists_all = np.abs(all_vals[:, None] - centers[None, :])
+    nearest = np.argmin(dists_all, axis=1)
+    lut = np.uint8(np.clip(np.round(centers[nearest]), 0, 255))
+    return lut[image]
+
+
 class NumPyKMeans:
     """Implementação vetorizada em NumPy puro do algoritmo K-Means (Lloyd + K-Means++)."""
 
@@ -40,7 +110,7 @@ class NumPyKMeans:
         self,
         n_clusters: int = 8,
         random_state: int | None = 42,
-        n_init: int = 10,
+        n_init: int = 5,
         max_iter: int = 100,
         tol: float = 1e-4,
         **kwargs: Any,
@@ -74,34 +144,41 @@ class NumPyKMeans:
             init_rng = np.random.default_rng(seed)
             centers = np.empty((effective_k, n_features), dtype=np.float32)
 
-            # K-Means++ initialization
-            centers[0] = unique_samples[init_rng.integers(0, len(unique_samples))]
-            closest_dist_sq = np.sum((unique_samples - centers[0]) ** 2, axis=1)
+            # K-Means++ em subamostra se o conjunto for grande
+            sub_size = min(10000, len(unique_samples))
+            if len(unique_samples) > sub_size:
+                sub_idx = init_rng.choice(len(unique_samples), size=sub_size, replace=False)
+                sample_pool = unique_samples[sub_idx]
+            else:
+                sample_pool = unique_samples
+
+            centers[0] = sample_pool[init_rng.integers(0, len(sample_pool))]
+            closest_dist_sq = np.sum((sample_pool - centers[0]) ** 2, axis=1)
 
             for c_idx in range(1, effective_k):
                 sum_sq = float(np.sum(closest_dist_sq))
                 if sum_sq > 0:
                     probs = closest_dist_sq / sum_sq
-                    centers[c_idx] = unique_samples[init_rng.choice(len(unique_samples), p=probs)]
+                    centers[c_idx] = sample_pool[init_rng.choice(len(sample_pool), p=probs)]
                 else:
-                    centers[c_idx] = unique_samples[init_rng.integers(0, len(unique_samples))]
-                new_dist = np.sum((unique_samples - centers[c_idx]) ** 2, axis=1)
+                    centers[c_idx] = sample_pool[init_rng.integers(0, len(sample_pool))]
+                new_dist = np.sum((sample_pool - centers[c_idx]) ** 2, axis=1)
                 closest_dist_sq = np.minimum(closest_dist_sq, new_dist)
 
-            # Iterações de Lloyd
+            # Iterações de Lloyd totalmente vetorizadas com np.bincount e np.add.at
             x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
             for _ in range(self.max_iter):
                 c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
                 dists = x_norm_sq - 2.0 * np.dot(X, centers.T) + c_norm_sq
                 labels = np.argmin(dists, axis=1)
 
-                new_centers = np.empty_like(centers)
-                for k in range(effective_k):
-                    mask = (labels == k)
-                    if np.any(mask):
-                        new_centers[k] = np.mean(X[mask], axis=0)
-                    else:
-                        new_centers[k] = centers[k]
+                counts = np.bincount(labels, minlength=effective_k)
+                centers_sum = np.zeros_like(centers)
+                np.add.at(centers_sum, labels, X)
+
+                active = counts > 0
+                new_centers = centers.copy()
+                new_centers[active] = centers_sum[active] / counts[active, None]
 
                 diff = float(np.max(np.abs(new_centers - centers)))
                 centers = new_centers
@@ -130,9 +207,9 @@ class NumPyMiniBatchKMeans:
         self,
         n_clusters: int = 8,
         random_state: int | None = 42,
-        n_init: int = 3,
-        max_iter: int = 100,
-        batch_size: int = 1024,
+        n_init: int = 2,
+        max_iter: int = 40,
+        batch_size: int = 2048,
         tol: float = 1e-4,
         **kwargs: Any,
     ) -> None:
@@ -150,24 +227,37 @@ class NumPyMiniBatchKMeans:
         n_samples, n_features = X.shape
         effective_k = min(self.n_clusters, n_samples)
 
-        unique_samples = np.unique(X, axis=0)
-        if len(unique_samples) <= effective_k:
-            self.cluster_centers_ = unique_samples.astype(np.float32)
-            dists = np.sum((X[:, None, :] - self.cluster_centers_[None, :, :]) ** 2, axis=2)
-            self.labels_ = np.argmin(dists, axis=1)
+        if n_samples <= effective_k:
+            self.cluster_centers_ = X.copy()
+            self.labels_ = np.arange(n_samples, dtype=np.int32)
             return self
 
         best_inertia = float("inf")
         best_centers = None
+        actual_batch_size = min(self.batch_size, n_samples)
 
         for init_idx in range(self.n_init):
             seed = None if self.random_state is None else (self.random_state + init_idx * 1000)
             init_rng = np.random.default_rng(seed)
-            init_indices = init_rng.choice(len(unique_samples), size=effective_k, replace=False)
-            centers = unique_samples[init_indices].astype(np.float32).copy()
-            counts = np.zeros(effective_k, dtype=np.int32)
 
-            actual_batch_size = min(self.batch_size, n_samples)
+            # Subamostragem rápida para K-Means++
+            sub_size = min(10000, n_samples)
+            sub_idx = init_rng.choice(n_samples, size=sub_size, replace=False)
+            sub_X = X[sub_idx]
+
+            centers = np.empty((effective_k, n_features), dtype=np.float32)
+            c0 = init_rng.integers(0, sub_size)
+            centers[0] = sub_X[c0]
+            closest_dist_sq = np.sum((sub_X - centers[0]) ** 2, axis=1)
+
+            for c in range(1, effective_k):
+                sum_sq = float(np.sum(closest_dist_sq))
+                probs = (closest_dist_sq / sum_sq) if sum_sq > 0 else None
+                chosen = init_rng.choice(sub_size, p=probs)
+                centers[c] = sub_X[chosen]
+                closest_dist_sq = np.minimum(closest_dist_sq, np.sum((sub_X - centers[c]) ** 2, axis=1))
+
+            counts = np.zeros(effective_k, dtype=np.int32)
 
             for _ in range(self.max_iter):
                 batch_idx = init_rng.integers(0, n_samples, size=actual_batch_size)
@@ -179,29 +269,47 @@ class NumPyMiniBatchKMeans:
                 b_labels = np.argmin(b_dists, axis=1)
 
                 old_centers = centers.copy()
-                for i in range(actual_batch_size):
-                    c = b_labels[i]
-                    counts[c] += 1
-                    lr = 1.0 / counts[c]
-                    centers[c] = (1.0 - lr) * centers[c] + lr * batch_X[i]
+
+                # Atualização 100% vetorizada com np.bincount e np.add.at
+                b_counts = np.bincount(b_labels, minlength=effective_k)
+                centers_sum = np.zeros_like(centers)
+                np.add.at(centers_sum, b_labels, batch_X)
+
+                active = b_counts > 0
+                counts[active] += b_counts[active]
+                eta = 1.0 / counts[active, None]
+                centers[active] = (1.0 - eta) * centers[active] + eta * (centers_sum[active] / b_counts[active, None])
 
                 if float(np.max(np.abs(centers - old_centers))) < self.tol:
                     break
 
-            x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
-            c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
-            dists = x_norm_sq - 2.0 * np.dot(X, centers.T) + c_norm_sq
-            inertia = float(np.sum(np.min(dists, axis=1)))
+            # Avaliação de inércia em amostra representativa
+            eval_size = min(4000, n_samples)
+            eval_idx = init_rng.choice(n_samples, size=eval_size, replace=False)
+            eval_X = X[eval_idx]
+            eval_d = (
+                np.sum(eval_X ** 2, axis=1, keepdims=True)
+                - 2.0 * np.dot(eval_X, centers.T)
+                + np.sum(centers ** 2, axis=1, keepdims=True).T
+            )
+            inertia = float(np.sum(np.min(eval_d, axis=1)))
 
             if inertia < best_inertia:
                 best_inertia = inertia
                 best_centers = centers
 
         self.cluster_centers_ = best_centers
+
+        # Atribuição final em chunks para otimização de cache e memória
+        chunk_size = 32768
+        self.labels_ = np.empty(n_samples, dtype=np.int32)
         c_norm_sq = np.sum(self.cluster_centers_ ** 2, axis=1, keepdims=True).T
-        x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
-        dists = x_norm_sq - 2.0 * np.dot(X, self.cluster_centers_.T) + c_norm_sq
-        self.labels_ = np.argmin(dists, axis=1)
+        for i in range(0, n_samples, chunk_size):
+            chunk_X = X[i : i + chunk_size]
+            chunk_norm = np.sum(chunk_X ** 2, axis=1, keepdims=True)
+            dists = chunk_norm - 2.0 * np.dot(chunk_X, self.cluster_centers_.T) + c_norm_sq
+            self.labels_[i : i + chunk_size] = np.argmin(dists, axis=1)
+
         return self
 
 
@@ -371,17 +479,23 @@ def quantize_kmeans(
 
     _validate_image(image)
 
-    # Carrega classe de K-Means sob demanda
+    # Carrega classe de K-Means sob demanda para acionar callbacks caso registrados
     if use_minibatch:
         ClusterClass = get_minibatch_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
     else:
         ClusterClass = get_kmeans_class(on_start_load=on_start_load, on_done_load=on_done_load)
 
-    # Prepara matriz de pixels (N_pixels, 1) para 2D cinza ou (N_pixels, 3) para 3D RGB
-    is_3d = (image.ndim == 3)
-    pixels = image.reshape(-1, 3 if is_3d else 1).astype(np.float32)
+    # Otimização específica para 1D (escala de cinza): K-Means ponderado por histograma via LUT
+    if image.ndim == 2:
+        return _quantize_kmeans_1d(
+            image=image,
+            bits=bits,
+            n_clusters=n_clusters,
+            random_state=random_state,
+        )
 
-    # Se a quantidade de pixels únicos for menor que k, ajusta k
+    # Imagens 3D (RGB): quantização vetorial no cubo de cores RGB
+    pixels = image.reshape(-1, 3).astype(np.float32)
     num_samples = pixels.shape[0]
     effective_k = min(k, num_samples)
 
@@ -391,7 +505,7 @@ def quantize_kmeans(
             cluster_model = ClusterClass(
                 n_clusters=effective_k,
                 random_state=random_state,
-                n_init=n_init,
+                n_init=min(n_init, 3),
                 batch_size=batch_size,
             )
         else:

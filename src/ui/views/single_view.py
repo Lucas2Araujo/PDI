@@ -687,6 +687,8 @@ class SingleView(ft.Column):
             if self._active_view_mode not in valid_values:
                 self._active_view_mode = "graph"
                 self._view_mode_buttons.selected = ["graph"]
+            else:
+                self._view_mode_buttons.selected = [self._active_view_mode]
 
     def _build_view_mode_controls(self) -> None:
         """Constrói as áreas de visualização modular do resultado com suporte a download em cada painel."""
@@ -719,6 +721,7 @@ class SingleView(ft.Column):
         )
         self._graph_image_box = ft.Container(
             content=self._graph_display_image,
+            height=520,
             alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
             on_click=lambda _: self._open_graph_figure_zoom(),
             ink=True,
@@ -751,7 +754,6 @@ class SingleView(ft.Column):
                 self._graph_image_box,
             ],
             spacing=10,
-            expand=True,
             visible=False,
         )
         self._native_graph_view = self._graph_container
@@ -1835,20 +1837,9 @@ class SingleView(ft.Column):
         self._page.update()
 
     def _check_and_notify_kmeans_lazy(self) -> None:
-        """Notifica o usuário com SnackBar na primeira vez que o módulo K-Means é requisitado."""
-        if is_kmeans_loaded():
-            return
-
-        self._show_message("⏳ Carregando módulo de quantização K-Means (scikit-learn)...", theme.INFO)
-
-        def _loader():
+        """Garante a inicialização do módulo K-Means de forma silenciosa e não-bloqueante."""
+        if not is_kmeans_loaded():
             get_kmeans_class()
-            self._show_message("✅ Módulo de quantização K-Means pronto para uso!", theme.SUCCESS)
-
-        if hasattr(self._page, "run_thread"):
-            self._page.run_thread(_loader)
-        else:
-            threading.Thread(target=_loader, daemon=True).start()
 
     def _on_bits_changed(self, event: ft.ControlEvent) -> None:
         self._bits_value = int(event.control.value)
@@ -1946,11 +1937,13 @@ class SingleView(ft.Column):
                 self._execute_quantization_single(target_input, start_time)
 
             # 4. Geração em segundo plano da versão quantizada em escala de cinza para a Grade Tripla
-            gray_source = to_grayscale(image_array, method=self._selected_gray_method if self._convert_to_gray else GrayscaleMethod.LUMINANCE)
-            if self._selected_technique_key == "BOTH":
-                gray_quant = quantize(gray_source, bits=self._bits_value, technique=QuantizationTechnique.KMEANS)
+            if self._convert_to_gray:
+                gray_quant = self._quantized_image
             else:
-                if self._enhancement_enabled and self._selected_technique_key != QuantizationTechnique.FLOYD_STEINBERG:
+                gray_source = to_grayscale(image_array, method=GrayscaleMethod.LUMINANCE)
+                if self._selected_technique_key == "BOTH":
+                    gray_quant = quantize(gray_source, bits=self._bits_value, technique=QuantizationTechnique.KMEANS)
+                elif self._enhancement_enabled and self._selected_technique_key != QuantizationTechnique.FLOYD_STEINBERG:
                     gray_quant = quantizacao_dithering_floyd_steinberg(gray_source, self._bits_value)
                 else:
                     gray_quant = quantize(gray_source, bits=self._bits_value, technique=self._selected_technique_key)
@@ -2008,6 +2001,8 @@ class SingleView(ft.Column):
                     mse_dither=self._dither_metrics.mse if self._dither_metrics else None,
                     psnr_dither=self._dither_metrics.psnr if self._dither_metrics else None,
                 )
+            else:
+                self._dither_figure_bytes = None
 
             self._update_execution_summary()
             self._update_view_mode_buttons()
@@ -2035,12 +2030,18 @@ class SingleView(ft.Column):
         import time
         uniform = quantize(target_input, bits=self._bits_value, technique=QuantizationTechnique.UNIFORM)
         kmeans = quantize(target_input, bits=self._bits_value, technique=QuantizationTechnique.KMEANS)
-        dither_unif = quantizacao_dithering_floyd_steinberg(target_input, self._bits_value)
+
+        needs_dither = self._enhancement_enabled or (self._active_view_mode == "dither_comp")
+        dither_unif = (
+            quantizacao_dithering_floyd_steinberg(target_input, self._bits_value)
+            if needs_dither
+            else None
+        )
 
         if self._convert_to_gray and is_channel_isolation(self._selected_gray_method):
             display_kmeans = colorize_channel(kmeans, self._selected_gray_method)
             display_uniform = colorize_channel(uniform, self._selected_gray_method)
-            display_dither = colorize_channel(dither_unif, self._selected_gray_method)
+            display_dither = colorize_channel(dither_unif, self._selected_gray_method) if dither_unif is not None else None
         else:
             display_kmeans = kmeans
             display_uniform = uniform
@@ -2049,7 +2050,7 @@ class SingleView(ft.Column):
         self._direct_quantized_image = display_uniform
         self._direct_quantized_bytes = _ndarray_to_png_bytes(display_uniform)
         self._dither_image = display_dither
-        self._dither_image_bytes = _ndarray_to_png_bytes(display_dither)
+        self._dither_image_bytes = _ndarray_to_png_bytes(display_dither) if display_dither is not None else None
 
         self._quantized_image = display_kmeans
         self._quantized_image_bytes = _ndarray_to_png_bytes(display_kmeans)
@@ -2057,7 +2058,7 @@ class SingleView(ft.Column):
         elapsed = time.perf_counter() - start_time
         m_unif = calculate_metrics(target_input, uniform, self._bits_value)
         m_km = calculate_metrics(target_input, kmeans, self._bits_value)
-        m_dit = calculate_metrics(target_input, dither_unif, self._bits_value)
+        m_dit = calculate_metrics(target_input, dither_unif, self._bits_value) if dither_unif is not None else None
 
         self._direct_metrics = m_unif
         self._kmeans_metrics = m_km
@@ -2073,16 +2074,20 @@ class SingleView(ft.Column):
         # 1. Quantização direta da técnica selecionada
         direct_quantized = quantize(target_input, bits=self._bits_value, technique=technique)
 
-        # 2. Quantização com difusão de erro (Floyd-Steinberg)
-        dither_quantized = (
-            direct_quantized
-            if technique == QuantizationTechnique.FLOYD_STEINBERG
-            else quantizacao_dithering_floyd_steinberg(target_input, self._bits_value)
-        )
+        # 2. Quantização com difusão de erro (Floyd-Steinberg) calculada sob demanda
+        needs_dither = self._enhancement_enabled or (technique == QuantizationTechnique.FLOYD_STEINBERG) or (self._active_view_mode == "dither_comp")
+        if needs_dither:
+            dither_quantized = (
+                direct_quantized
+                if technique == QuantizationTechnique.FLOYD_STEINBERG
+                else quantizacao_dithering_floyd_steinberg(target_input, self._bits_value)
+            )
+        else:
+            dither_quantized = None
 
         if self._convert_to_gray and is_channel_isolation(self._selected_gray_method):
             display_direct = colorize_channel(direct_quantized, self._selected_gray_method)
-            display_dither = colorize_channel(dither_quantized, self._selected_gray_method)
+            display_dither = colorize_channel(dither_quantized, self._selected_gray_method) if dither_quantized is not None else None
         else:
             display_direct = direct_quantized
             display_dither = dither_quantized
@@ -2090,11 +2095,11 @@ class SingleView(ft.Column):
         self._direct_quantized_image = display_direct
         self._direct_quantized_bytes = _ndarray_to_png_bytes(display_direct)
         self._dither_image = display_dither
-        self._dither_image_bytes = _ndarray_to_png_bytes(display_dither)
+        self._dither_image_bytes = _ndarray_to_png_bytes(display_dither) if display_dither is not None else None
 
         # Determina qual imagem será exibida como ativa principal
         use_dither = self._enhancement_enabled or (technique == QuantizationTechnique.FLOYD_STEINBERG)
-        active_img = display_dither if use_dither else display_direct
+        active_img = display_dither if (use_dither and display_dither is not None) else display_direct
         self._quantized_image = active_img
         self._quantized_image_bytes = _ndarray_to_png_bytes(active_img)
 
@@ -2105,14 +2110,18 @@ class SingleView(ft.Column):
         elapsed = time.perf_counter() - start_time
 
         m_direct = calculate_metrics(target_input, direct_quantized, self._bits_value)
-        m_dither = calculate_metrics(target_input, dither_quantized, self._bits_value)
         self._direct_metrics = m_direct
-        self._dither_metrics = m_dither
+        if dither_quantized is not None:
+            m_dither = calculate_metrics(target_input, dither_quantized, self._bits_value)
+            self._dither_metrics = m_dither
+        else:
+            m_dither = None
+            self._dither_metrics = None
 
-        metrics = m_dither if use_dither else m_direct
+        metrics = m_dither if (use_dither and m_dither is not None) else m_direct
         self._update_metrics(metrics, elapsed, t_name, m_label)
 
-        if self._active_view_mode == "dither_comp":
+        if self._active_view_mode == "dither_comp" and m_direct is not None and m_dither is not None:
             self._update_metrics_dither_comparison(m_direct, m_dither, elapsed)
 
     async def _on_save(self, _: ft.ControlEvent) -> None:
@@ -2264,6 +2273,7 @@ class SingleView(ft.Column):
     def _display_graph_mode(self, t_name: str, m_name: str) -> None:
         """Renderiza a Figura Analítica Consolidada (Imagens + Histogramas Integrados)."""
         if not self._figure_bytes:
+            self._display_image_mode()
             return
         self._graph_display_image.src = _bytes_to_data_uri(self._figure_bytes)
         self._graph_container.visible = True
@@ -2272,6 +2282,7 @@ class SingleView(ft.Column):
         """Renderiza a Figura Analítica Consolidada com destaque Colorido (RGB)."""
         fig_bytes = self._color_figure_bytes or self._figure_bytes
         if not fig_bytes:
+            self._display_image_mode()
             return
         self._graph_display_image.src = _bytes_to_data_uri(fig_bytes)
         self._graph_container.visible = True

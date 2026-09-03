@@ -1050,18 +1050,9 @@ class BatchView(ft.Column):
         self._page.update()
 
     def _check_and_notify_kmeans_lazy(self) -> None:
-        """Notifica o usuário com SnackBar na primeira vez que o módulo K-Means é requisitado."""
+        """Garante a inicialização do módulo K-Means de forma silenciosa e não-bloqueante."""
         if not is_kmeans_loaded():
-            self._show_message("⏳ Carregando módulo de quantização K-Means (scikit-learn)...", theme.INFO)
-            def _loader():
-                get_kmeans_class()
-                self._show_message("✅ Módulo de quantização K-Means pronto para uso!", theme.SUCCESS)
-
-            if hasattr(self._page, "run_thread"):
-                self._page.run_thread(_loader)
-            else:
-                import threading
-                threading.Thread(target=_loader, daemon=True).start()
+            get_kmeans_class()
 
     def _on_bits_changed(self, event: ft.ControlEvent) -> None:
         self._bits_value = int(event.control.value)
