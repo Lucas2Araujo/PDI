@@ -25,12 +25,184 @@ Referências:
 
 from enum import Enum, auto
 import gc
-from typing import Callable
+from typing import Any, Callable
 import numpy as np
 
-# Controle de estado de carregamento sob demanda do scikit-learn
+# Controle de estado de carregamento do K-Means em NumPy puro
 _KMEANS_CLASS = None
 _MINIBATCH_KMEANS_CLASS = None
+
+
+class NumPyKMeans:
+    """Implementação vetorizada em NumPy puro do algoritmo K-Means (Lloyd + K-Means++)."""
+
+    def __init__(
+        self,
+        n_clusters: int = 8,
+        random_state: int | None = 42,
+        n_init: int = 10,
+        max_iter: int = 100,
+        tol: float = 1e-4,
+        **kwargs: Any,
+    ) -> None:
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.n_init = n_init
+        self.max_iter = max_iter
+        self.tol = tol
+        self.cluster_centers_: np.ndarray | None = None
+        self.labels_: np.ndarray | None = None
+
+    def fit(self, X: np.ndarray) -> "NumPyKMeans":
+        X = np.asarray(X, dtype=np.float32)
+        n_samples, n_features = X.shape
+        effective_k = min(self.n_clusters, n_samples)
+
+        unique_samples = np.unique(X, axis=0)
+        if len(unique_samples) <= effective_k:
+            self.cluster_centers_ = unique_samples.astype(np.float32)
+            dists = np.sum((X[:, None, :] - self.cluster_centers_[None, :, :]) ** 2, axis=2)
+            self.labels_ = np.argmin(dists, axis=1)
+            return self
+
+        best_inertia = float("inf")
+        best_centers = None
+        best_labels = None
+
+        for init_idx in range(self.n_init):
+            seed = None if self.random_state is None else (self.random_state + init_idx * 1000)
+            init_rng = np.random.default_rng(seed)
+            centers = np.empty((effective_k, n_features), dtype=np.float32)
+
+            # K-Means++ initialization
+            centers[0] = unique_samples[init_rng.integers(0, len(unique_samples))]
+            closest_dist_sq = np.sum((unique_samples - centers[0]) ** 2, axis=1)
+
+            for c_idx in range(1, effective_k):
+                sum_sq = float(np.sum(closest_dist_sq))
+                if sum_sq > 0:
+                    probs = closest_dist_sq / sum_sq
+                    centers[c_idx] = unique_samples[init_rng.choice(len(unique_samples), p=probs)]
+                else:
+                    centers[c_idx] = unique_samples[init_rng.integers(0, len(unique_samples))]
+                new_dist = np.sum((unique_samples - centers[c_idx]) ** 2, axis=1)
+                closest_dist_sq = np.minimum(closest_dist_sq, new_dist)
+
+            # Iterações de Lloyd
+            x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
+            for _ in range(self.max_iter):
+                c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+                dists = x_norm_sq - 2.0 * np.dot(X, centers.T) + c_norm_sq
+                labels = np.argmin(dists, axis=1)
+
+                new_centers = np.empty_like(centers)
+                for k in range(effective_k):
+                    mask = (labels == k)
+                    if np.any(mask):
+                        new_centers[k] = np.mean(X[mask], axis=0)
+                    else:
+                        new_centers[k] = centers[k]
+
+                diff = float(np.max(np.abs(new_centers - centers)))
+                centers = new_centers
+                if diff < self.tol:
+                    break
+
+            c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+            dists = x_norm_sq - 2.0 * np.dot(X, centers.T) + c_norm_sq
+            labels = np.argmin(dists, axis=1)
+            inertia = float(np.sum(np.min(dists, axis=1)))
+
+            if inertia < best_inertia:
+                best_inertia = inertia
+                best_centers = centers
+                best_labels = labels
+
+        self.cluster_centers_ = best_centers
+        self.labels_ = best_labels
+        return self
+
+
+class NumPyMiniBatchKMeans:
+    """Implementação vetorizada em NumPy puro de MiniBatch K-Means para alta velocidade."""
+
+    def __init__(
+        self,
+        n_clusters: int = 8,
+        random_state: int | None = 42,
+        n_init: int = 3,
+        max_iter: int = 100,
+        batch_size: int = 1024,
+        tol: float = 1e-4,
+        **kwargs: Any,
+    ) -> None:
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.n_init = n_init
+        self.max_iter = max_iter
+        self.batch_size = batch_size
+        self.tol = tol
+        self.cluster_centers_: np.ndarray | None = None
+        self.labels_: np.ndarray | None = None
+
+    def fit(self, X: np.ndarray) -> "NumPyMiniBatchKMeans":
+        X = np.asarray(X, dtype=np.float32)
+        n_samples, n_features = X.shape
+        effective_k = min(self.n_clusters, n_samples)
+
+        unique_samples = np.unique(X, axis=0)
+        if len(unique_samples) <= effective_k:
+            self.cluster_centers_ = unique_samples.astype(np.float32)
+            dists = np.sum((X[:, None, :] - self.cluster_centers_[None, :, :]) ** 2, axis=2)
+            self.labels_ = np.argmin(dists, axis=1)
+            return self
+
+        best_inertia = float("inf")
+        best_centers = None
+
+        for init_idx in range(self.n_init):
+            seed = None if self.random_state is None else (self.random_state + init_idx * 1000)
+            init_rng = np.random.default_rng(seed)
+            init_indices = init_rng.choice(len(unique_samples), size=effective_k, replace=False)
+            centers = unique_samples[init_indices].astype(np.float32).copy()
+            counts = np.zeros(effective_k, dtype=np.int32)
+
+            actual_batch_size = min(self.batch_size, n_samples)
+
+            for _ in range(self.max_iter):
+                batch_idx = init_rng.integers(0, n_samples, size=actual_batch_size)
+                batch_X = X[batch_idx]
+
+                b_norm_sq = np.sum(batch_X ** 2, axis=1, keepdims=True)
+                c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+                b_dists = b_norm_sq - 2.0 * np.dot(batch_X, centers.T) + c_norm_sq
+                b_labels = np.argmin(b_dists, axis=1)
+
+                old_centers = centers.copy()
+                for i in range(actual_batch_size):
+                    c = b_labels[i]
+                    counts[c] += 1
+                    lr = 1.0 / counts[c]
+                    centers[c] = (1.0 - lr) * centers[c] + lr * batch_X[i]
+
+                if float(np.max(np.abs(centers - old_centers))) < self.tol:
+                    break
+
+            x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
+            c_norm_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+            dists = x_norm_sq - 2.0 * np.dot(X, centers.T) + c_norm_sq
+            inertia = float(np.sum(np.min(dists, axis=1)))
+
+            if inertia < best_inertia:
+                best_inertia = inertia
+                best_centers = centers
+
+        self.cluster_centers_ = best_centers
+        c_norm_sq = np.sum(self.cluster_centers_ ** 2, axis=1, keepdims=True).T
+        x_norm_sq = np.sum(X ** 2, axis=1, keepdims=True)
+        dists = x_norm_sq - 2.0 * np.dot(X, self.cluster_centers_.T) + c_norm_sq
+        self.labels_ = np.argmin(dists, axis=1)
+        return self
 
 
 class QuantizationTechnique(Enum):
@@ -43,7 +215,7 @@ class QuantizationTechnique(Enum):
 
 
 def is_kmeans_loaded() -> bool:
-    """Verifica se a classe KMeans do scikit-learn já foi importada em memória."""
+    """Verifica se a classe KMeans já foi inicializada em memória."""
     return _KMEANS_CLASS is not None
 
 
@@ -51,23 +223,12 @@ def get_kmeans_class(
     on_start_load: Callable[[], None] | None = None,
     on_done_load: Callable[[], None] | None = None,
 ):
-    """
-    Importa e retorna a classe KMeans sob demanda (Lazy Loading), evitando o overhead
-    de importação de dezenas de megabytes do scikit-learn durante o boot inicial da aplicação.
-
-    Args:
-        on_start_load: Callback opcional executado antes de iniciar a importação.
-        on_done_load: Callback opcional executado imediatamente após a importação.
-
-    Returns:
-        Classe sklearn.cluster.KMeans.
-    """
+    """Retorna a classe NumPyKMeans compatível."""
     global _KMEANS_CLASS
     if _KMEANS_CLASS is None:
         if on_start_load is not None:
             on_start_load()
-        from sklearn.cluster import KMeans as _KM
-        _KMEANS_CLASS = _KM
+        _KMEANS_CLASS = NumPyKMeans
         if on_done_load is not None:
             on_done_load()
     return _KMEANS_CLASS
@@ -77,22 +238,12 @@ def get_minibatch_kmeans_class(
     on_start_load: Callable[[], None] | None = None,
     on_done_load: Callable[[], None] | None = None,
 ):
-    """
-    Importa e retorna a classe MiniBatchKMeans sob demanda (Lazy Loading).
-
-    Args:
-        on_start_load: Callback opcional executado antes de iniciar a importação.
-        on_done_load: Callback opcional executado imediatamente após a importação.
-
-    Returns:
-        Classe sklearn.cluster.MiniBatchKMeans.
-    """
+    """Retorna a classe NumPyMiniBatchKMeans compatível."""
     global _MINIBATCH_KMEANS_CLASS
     if _MINIBATCH_KMEANS_CLASS is None:
         if on_start_load is not None:
             on_start_load()
-        from sklearn.cluster import MiniBatchKMeans as _MBKM
-        _MINIBATCH_KMEANS_CLASS = _MBKM
+        _MINIBATCH_KMEANS_CLASS = NumPyMiniBatchKMeans
         if on_done_load is not None:
             on_done_load()
     return _MINIBATCH_KMEANS_CLASS

@@ -17,6 +17,7 @@ import gc
 import io
 from typing import Any
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +155,216 @@ def calculate_metrics(original: np.ndarray, quantized: np.ndarray, bits: int) ->
 
 
 # ---------------------------------------------------------------------------
-# Funções de Renderização Legadas (Matplotlib sob demanda)
+# Funções de Renderização Analítica com Pillow Puro (Zero Dependência de Matplotlib)
 # ---------------------------------------------------------------------------
+
+
+def _get_font(size: int = 16, bold: bool = False) -> Any:
+    """Busca e carrega fontes TrueType do sistema com suporte completo a caracteres UTF-8 e acentos."""
+    candidates = [
+        # Linux Adwaita / GNOME
+        "AdwaitaSans-Bold.ttf" if bold else "AdwaitaSans-Regular.ttf",
+        "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Bold.ttf" if bold else "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
+        # Linux DejaVu / Debian / Ubuntu / Fedora
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        # Linux Carlito / Liberation
+        "Carlito-Bold.ttf" if bold else "Carlito-Regular.ttf",
+        "LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf",
+        # Windows / macOS
+        "arialbd.ttf" if bold else "arial.ttf",
+        "Arial Bold.ttf" if bold else "Arial.ttf",
+        "segoeuib.ttf" if bold else "segoeui.ttf",
+        "Helvetica.ttc",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _hex_to_rgb(hex_str: str) -> tuple[int, int, int]:
+    """Converte string hexadecimal (#RRGGBB) para tupla RGB (r, g, b)."""
+    hex_clean = hex_str.lstrip("#")
+    if len(hex_clean) == 6:
+        try:
+            return (
+                int(hex_clean[0:2], 16),
+                int(hex_clean[2:4], 16),
+                int(hex_clean[4:6], 16),
+            )
+        except ValueError:
+            pass
+    return (74, 144, 217)
+
+
+def _draw_cell_image(
+    draw: ImageDraw.ImageDraw,
+    canvas: Image.Image,
+    image: np.ndarray,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    title: str,
+    font_title: Any,
+) -> None:
+    """Desenha um cartão com a imagem centralizada preservando proporções e fidelidade de pixels (NEAREST)."""
+    draw.rectangle([x, y, x + w, y + h], fill=(36, 38, 46), outline=(68, 72, 88), width=2)
+    draw.text((x + 18, y + 16), title, fill=(245, 245, 250), font=font_title)
+
+    if image.ndim == 2:
+        pil_img = Image.fromarray(image).convert("RGB")
+    else:
+        disp = image[:, :, :3] if image.shape[2] >= 3 else image
+        if disp.dtype != np.uint8 and np.issubdtype(disp.dtype, np.floating):
+            disp = (np.clip(disp, 0.0, 1.0) * 255).astype(np.uint8)
+        pil_img = Image.fromarray(disp)
+
+    max_w = max(20, w - 36)
+    max_h = max(20, h - 75)
+
+    # Usa NEAREST para preservar 100% dos tons e degraus discretos da quantização sem borrar
+    scale = min(max_w / pil_img.width, max_h / pil_img.height)
+    new_w = max(1, int(round(pil_img.width * scale)))
+    new_h = max(1, int(round(pil_img.height * scale)))
+    pil_img = pil_img.resize((new_w, new_h), Image.Resampling.NEAREST)
+
+    px = x + (w - pil_img.width) // 2
+    py = y + 58 + (max_h - pil_img.height) // 2
+    canvas.paste(pil_img, (px, py))
+
+
+def _draw_cell_histogram(
+    draw: ImageDraw.ImageDraw,
+    counts: np.ndarray,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    title: str,
+    color_hex: str,
+    font_title: Any,
+    font_axis: Any,
+) -> None:
+    """Desenha o histograma de intensidades em escala de cinza com eixos e grid em alta resolução."""
+    draw.rectangle([x, y, x + w, y + h], fill=(36, 38, 46), outline=(68, 72, 88), width=2)
+    draw.text((x + 18, y + 16), title, fill=(245, 245, 250), font=font_title)
+
+    ml, mr, mt, mb = 75, 24, 60, 52
+    pw, ph = max(20, w - ml - mr), max(20, h - mt - mb)
+    bx0, by0, bx1, by1 = x + ml, y + mt, x + w - mr, y + h - mb
+
+    # Fundo do gráfico
+    draw.rectangle([bx0, by0, bx1, by1], fill=(26, 28, 34), outline=(85, 90, 110), width=2)
+
+    # Linhas de grade horizontais
+    for s in (0.25, 0.5, 0.75):
+        gy = int(by0 + ph * s)
+        draw.line([(bx0, gy), (bx1, gy)], fill=(48, 52, 64), width=1)
+
+    # Linhas e rótulos de grade verticais
+    for tick in (64, 128, 192):
+        gx = int(bx0 + pw * (tick / 256.0))
+        draw.line([(gx, by0), (gx, by1)], fill=(48, 52, 64), width=1)
+        draw.text((gx - 14, by1 + 8), str(tick), fill=(180, 180, 195), font=font_axis)
+    draw.text((bx0 - 6, by1 + 8), "0", fill=(180, 180, 195), font=font_axis)
+    draw.text((bx1 - 28, by1 + 8), "255", fill=(180, 180, 195), font=font_axis)
+    draw.text((bx0 + pw // 2 - 40, by1 + 28), "Intensidade", fill=(160, 160, 175), font=font_axis)
+
+    # Barras de frequência
+    bar_rgb = _hex_to_rgb(color_hex)
+    max_c = float(counts.max()) if counts.max() > 0 else 1.0
+    for i in range(256):
+        c = counts[i]
+        if c <= 0:
+            continue
+        bar_h = int((c / max_c) * ph)
+        rx0 = int(bx0 + i * (pw / 256.0))
+        rx1 = max(rx0 + 1, int(bx0 + (i + 1) * (pw / 256.0)))
+        ry1 = by1
+        ry0 = ry1 - bar_h
+        draw.rectangle([rx0, ry0, rx1, ry1], fill=bar_rgb)
+
+
+def _draw_cell_rgb_histogram(
+    draw: ImageDraw.ImageDraw,
+    image: np.ndarray,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    title: str,
+    font_title: Any,
+    font_axis: Any,
+) -> None:
+    """Desenha histograma cromático com as curvas R, G e B sobrepostas em alta definição."""
+    draw.rectangle([x, y, x + w, y + h], fill=(36, 38, 46), outline=(68, 72, 88), width=2)
+    draw.text((x + 18, y + 16), title, fill=(245, 245, 250), font=font_title)
+
+    ml, mr, mt, mb = 75, 24, 60, 52
+    pw, ph = max(20, w - ml - mr), max(20, h - mt - mb)
+    bx0, by0, bx1, by1 = x + ml, y + mt, x + w - mr, y + h - mb
+
+    draw.rectangle([bx0, by0, bx1, by1], fill=(26, 28, 34), outline=(85, 90, 110), width=2)
+
+    for s in (0.25, 0.5, 0.75):
+        gy = int(by0 + ph * s)
+        draw.line([(bx0, gy), (bx1, gy)], fill=(48, 52, 64), width=1)
+    for tick in (64, 128, 192):
+        gx = int(bx0 + pw * (tick / 256.0))
+        draw.line([(gx, by0), (gx, by1)], fill=(48, 52, 64), width=1)
+        draw.text((gx - 14, by1 + 8), str(tick), fill=(180, 180, 195), font=font_axis)
+    draw.text((bx0 - 6, by1 + 8), "0", fill=(180, 180, 195), font=font_axis)
+    draw.text((bx1 - 28, by1 + 8), "255", fill=(180, 180, 195), font=font_axis)
+    draw.text((bx0 + pw // 2 - 40, by1 + 28), "Intensidade", fill=(160, 160, 175), font=font_axis)
+
+    if image.ndim == 2:
+        c_gray, _ = np.histogram(image.ravel(), bins=256, range=(0, 256))
+        max_c = float(c_gray.max()) if c_gray.max() > 0 else 1.0
+        for i in range(256):
+            if c_gray[i] > 0:
+                bar_h = int((c_gray[i] / max_c) * ph)
+                rx0 = int(bx0 + i * (pw / 256.0))
+                rx1 = max(rx0 + 1, int(bx0 + (i + 1) * (pw / 256.0)))
+                draw.rectangle([rx0, by1 - bar_h, rx1, by1], fill=(130, 130, 135))
+        return
+
+    rgb = image[:, :, :3]
+    if rgb.dtype != np.uint8 and np.issubdtype(rgb.dtype, np.floating):
+        rgb = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+
+    c_r, _ = np.histogram(rgb[:, :, 0].ravel(), bins=256, range=(0, 256))
+    c_g, _ = np.histogram(rgb[:, :, 1].ravel(), bins=256, range=(0, 256))
+    c_b, _ = np.histogram(rgb[:, :, 2].ravel(), bins=256, range=(0, 256))
+    max_c = float(max(c_r.max(), c_g.max(), c_b.max(), 1))
+
+    colors = [(235, 65, 60), (70, 175, 75), (40, 150, 245)]
+    counts_list = [c_r, c_g, c_b]
+    labels = ["R", "G", "B"]
+
+    for color, cnt in zip(colors, counts_list):
+        pts = []
+        for i in range(256):
+            px = int(bx0 + i * (pw / 255.0))
+            py = int(by1 - (cnt[i] / max_c) * ph)
+            pts.append((px, py))
+        if len(pts) > 1:
+            draw.line(pts, fill=color, width=3)
+
+    # Legenda RGB com indicador de cor e fonte TrueType
+    lx = bx1 - 110
+    ly = by0 + 12
+    for idx, (lbl, col) in enumerate(zip(labels, colors)):
+        rx = lx + idx * 36
+        draw.line([(rx, ly + 8), (rx + 14, ly + 8)], fill=col, width=3)
+        draw.text((rx + 18, ly), lbl, fill=(220, 220, 230), font=font_axis)
 
 
 def generate_comparison_figure(
@@ -167,41 +376,53 @@ def generate_comparison_figure(
     hist_color: str = "#4a90d9",
     orig_hist_color: str = "#555555",
 ) -> bytes:
-    """Gera uma figura Matplotlib comparativa para exportação ou relatórios."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    """Gera uma figura comparativa 2×2 em Ultra-HD via Pillow puro para exportação e relatórios."""
     n_tons = 2 ** bits
     is_rgb = bool(original.ndim == 3 and original.shape[2] >= 3)
     info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
     method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    fig.suptitle(
-        f"Comparação de Quantização — {technique_name}{method_str} {info_bits}",
-        fontsize=14,
-        fontweight="bold",
-    )
+    total_w, total_h = 2200, 1450
+    header_h = 70
+    margin = 24
+    grid_w = (total_w - margin * 3) // 2
+    grid_h = (total_h - header_h - margin * 3) // 2
 
-    _plot_image(axes[0, 0], original, "Original (8 bits)")
-    _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n{info_bits}")
+    canvas = Image.new("RGB", (total_w, total_h), (22, 24, 30))
+    draw = ImageDraw.Draw(canvas)
 
+    f_head = _get_font(28, bold=True)
+    f_cell = _get_font(20, bold=True)
+    f_axis = _get_font(15, bold=False)
+
+    # Header
+    title = f"Comparação de Quantização — {technique_name}{method_str} {info_bits}"
+    draw.text((margin, 20), title, fill=(255, 255, 255), font=f_head)
+
+    # Linha 1: Imagens
+    x0 = margin
+    x1 = margin * 2 + grid_w
+    y_img = header_h + margin
+    y_hist = header_h + margin * 2 + grid_h
+
+    _draw_cell_image(draw, canvas, original, x0, y_img, grid_w, grid_h, "Original (8 bits)", f_cell)
+    _draw_cell_image(draw, canvas, quantized, x1, y_img, grid_w, grid_h, f"Quantizada via {technique_name} {info_bits}", f_cell)
+
+    # Linha 2: Histogramas
     if is_rgb:
-        _plot_rgb_histogram(axes[1, 0], original, "Histograma RGB — Original")
-        _plot_rgb_histogram(axes[1, 1], quantized, f"Histograma RGB — {technique_name}")
+        _draw_cell_rgb_histogram(draw, original, x0, y_hist, grid_w, grid_h, "Histograma RGB — Original", f_cell, f_axis)
+        _draw_cell_rgb_histogram(draw, quantized, x1, y_hist, grid_w, grid_h, f"Histograma RGB — {technique_name}", f_cell, f_axis)
     else:
-        hist_original = compute_histogram(original)
-        hist_quantized = compute_histogram(quantized)
-        _plot_histogram(axes[1, 0], hist_original, "Histograma — Original (8 bits)", color=orig_hist_color)
-        _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color=hist_color)
+        h_orig = compute_histogram(original)
+        h_quant = compute_histogram(quantized)
+        _draw_cell_histogram(draw, h_orig.counts, x0, y_hist, grid_w, grid_h, "Histograma — Original (8 bits)", orig_hist_color, f_cell, f_axis)
+        _draw_cell_histogram(draw, h_quant.counts, x1, y_hist, grid_w, grid_h, f"Histograma — {technique_name}", hist_color, f_cell, f_axis)
 
-    plt.tight_layout()
-    figure_bytes = _figure_to_bytes(fig)
-    plt.close(fig)
-    del fig, axes
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    del canvas, draw
     gc.collect()
-    return figure_bytes
+    return buf.getvalue()
 
 
 def generate_full_comparison_figure(
@@ -214,45 +435,57 @@ def generate_full_comparison_figure(
     hist_color_km: str = "#e8624a",
     orig_hist_color: str = "#555555",
 ) -> bytes:
-    """Gera a figura completa de comparação das 3 imagens (Original, Uniforme, K-Means)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    """Gera a figura completa 2×3 em Ultra-HD de comparação das 3 imagens (Original, Uniforme, K-Means)."""
     n_tons = 2 ** bits
     is_rgb = bool(original.ndim == 3 and original.shape[2] >= 3)
     info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
     method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
-    fig.suptitle(
-        f"Comparação Completa (Uniforme × K-Means){method_str} — {info_bits}",
-        fontsize=14,
-        fontweight="bold",
-    )
+    total_w, total_h = 3000, 1450
+    header_h = 70
+    margin = 24
+    grid_w = (total_w - margin * 4) // 3
+    grid_h = (total_h - header_h - margin * 3) // 2
 
-    _plot_image(axes[0, 0], original, "Original (8 bits)")
-    _plot_image(axes[0, 1], uniform, f"Quantização Uniforme {info_bits}")
-    _plot_image(axes[0, 2], kmeans, f"Quantização K-Means {info_bits}")
+    canvas = Image.new("RGB", (total_w, total_h), (22, 24, 30))
+    draw = ImageDraw.Draw(canvas)
 
+    f_head = _get_font(28, bold=True)
+    f_cell = _get_font(20, bold=True)
+    f_axis = _get_font(15, bold=False)
+
+    title = f"Comparação Completa (Uniforme × K-Means){method_str} — {info_bits}"
+    draw.text((margin, 20), title, fill=(255, 255, 255), font=f_head)
+
+    x0 = margin
+    x1 = margin * 2 + grid_w
+    x2 = margin * 3 + grid_w * 2
+    y_img = header_h + margin
+    y_hist = header_h + margin * 2 + grid_h
+
+    # Linha 1: Imagens
+    _draw_cell_image(draw, canvas, original, x0, y_img, grid_w, grid_h, "Original (8 bits)", f_cell)
+    _draw_cell_image(draw, canvas, uniform, x1, y_img, grid_w, grid_h, f"Quantização Uniforme {info_bits}", f_cell)
+    _draw_cell_image(draw, canvas, kmeans, x2, y_img, grid_w, grid_h, f"Quantização K-Means {info_bits}", f_cell)
+
+    # Linha 2: Histogramas
     if is_rgb:
-        _plot_rgb_histogram(axes[1, 0], original, "Histograma RGB — Original")
-        _plot_rgb_histogram(axes[1, 1], uniform, "Histograma RGB — Uniforme")
-        _plot_rgb_histogram(axes[1, 2], kmeans, "Histograma RGB — K-Means")
+        _draw_cell_rgb_histogram(draw, original, x0, y_hist, grid_w, grid_h, "Histograma RGB — Original", f_cell, f_axis)
+        _draw_cell_rgb_histogram(draw, uniform, x1, y_hist, grid_w, grid_h, "Histograma RGB — Uniforme", f_cell, f_axis)
+        _draw_cell_rgb_histogram(draw, kmeans, x2, y_hist, grid_w, grid_h, "Histograma RGB — K-Means", f_cell, f_axis)
     else:
-        hist_orig = compute_histogram(original)
-        hist_unif = compute_histogram(uniform)
-        hist_km = compute_histogram(kmeans)
-        _plot_histogram(axes[1, 0], hist_orig, "Histograma — Original", color=orig_hist_color)
-        _plot_histogram(axes[1, 1], hist_unif, "Histograma — Uniforme", color=hist_color_unif)
-        _plot_histogram(axes[1, 2], hist_km, "Histograma — K-Means", color=hist_color_km)
+        h_orig = compute_histogram(original)
+        h_unif = compute_histogram(uniform)
+        h_km = compute_histogram(kmeans)
+        _draw_cell_histogram(draw, h_orig.counts, x0, y_hist, grid_w, grid_h, "Histograma — Original", orig_hist_color, f_cell, f_axis)
+        _draw_cell_histogram(draw, h_unif.counts, x1, y_hist, grid_w, grid_h, "Histograma — Uniforme", hist_color_unif, f_cell, f_axis)
+        _draw_cell_histogram(draw, h_km.counts, x2, y_hist, grid_w, grid_h, "Histograma — K-Means", hist_color_km, f_cell, f_axis)
 
-    plt.tight_layout()
-    figure_bytes = _figure_to_bytes(fig)
-    plt.close(fig)
-    del fig, axes
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    del canvas, draw
     gc.collect()
-    return figure_bytes
+    return buf.getvalue()
 
 
 def generate_color_comparison_figure(
@@ -263,60 +496,81 @@ def generate_color_comparison_figure(
     gray_image: np.ndarray | None = None,
     gray_method_name: str | None = None,
 ) -> bytes:
-    """Gera uma figura comparativa destacando a imagem original colorida (RGB)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    """Gera uma figura comparativa em Ultra-HD destacando a imagem original colorida (RGB)."""
     n_tons = 2 ** bits
     is_quant_rgb = bool(quantized.ndim == 3 and quantized.shape[2] >= 3)
     info_bits = f"({bits} bits / {(2**bits)**3 if is_quant_rgb else n_tons} tons)"
     method_str = f" | {gray_method_name}" if gray_method_name else ""
 
+    f_head = _get_font(28, bold=True)
+    f_cell = _get_font(20, bold=True)
+    f_axis = _get_font(15, bold=False)
+
     if gray_image is not None:
-        hist_gray = compute_histogram(gray_image)
-        fig, axes = plt.subplots(2, 3, figsize=(18, 8))
-        fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}",
-            fontsize=14,
-            fontweight="bold",
-        )
+        total_w, total_h = 3000, 1450
+        header_h = 70
+        margin = 24
+        grid_w = (total_w - margin * 4) // 3
+        grid_h = (total_h - header_h - margin * 3) // 2
 
-        _plot_color_image(axes[0, 0], color_image, "1. Original Colorida (RGB)")
-        _plot_image(axes[0, 1], gray_image, f"2. Escala de Cinza ({gray_method_name or '8 bits'})")
-        _plot_image(axes[0, 2], quantized, f"3. Quantizada via {technique_name}\n{info_bits}")
+        canvas = Image.new("RGB", (total_w, total_h), (22, 24, 30))
+        draw = ImageDraw.Draw(canvas)
 
-        _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
-        _plot_histogram(axes[1, 1], hist_gray, "Histograma — Cinza", color="#555555")
+        title = f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}"
+        draw.text((margin, 20), title, fill=(255, 255, 255), font=f_head)
+
+        x0 = margin
+        x1 = margin * 2 + grid_w
+        x2 = margin * 3 + grid_w * 2
+        y_img = header_h + margin
+        y_hist = header_h + margin * 2 + grid_h
+
+        _draw_cell_image(draw, canvas, color_image, x0, y_img, grid_w, grid_h, "1. Original Colorida (RGB)", f_cell)
+        _draw_cell_image(draw, canvas, gray_image, x1, y_img, grid_w, grid_h, f"2. Escala de Cinza ({gray_method_name or '8 bits'})", f_cell)
+        _draw_cell_image(draw, canvas, quantized, x2, y_img, grid_w, grid_h, f"3. Quantizada via {technique_name} {info_bits}", f_cell)
+
+        _draw_cell_rgb_histogram(draw, color_image, x0, y_hist, grid_w, grid_h, "Histograma de Cores (RGB)", f_cell, f_axis)
+        h_gray = compute_histogram(gray_image)
+        _draw_cell_histogram(draw, h_gray.counts, x1, y_hist, grid_w, grid_h, "Histograma — Cinza", "#555555", f_cell, f_axis)
+
         if is_quant_rgb:
-            _plot_rgb_histogram(axes[1, 2], quantized, f"Histograma RGB — {technique_name}")
+            _draw_cell_rgb_histogram(draw, quantized, x2, y_hist, grid_w, grid_h, f"Histograma RGB — {technique_name}", f_cell, f_axis)
         else:
-            hist_quantized = compute_histogram(quantized)
-            _plot_histogram(axes[1, 2], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
+            h_q = compute_histogram(quantized)
+            _draw_cell_histogram(draw, h_q.counts, x2, y_hist, grid_w, grid_h, f"Histograma — {technique_name}", "#e8624a", f_cell, f_axis)
     else:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        fig.suptitle(
-            f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}",
-            fontsize=14,
-            fontweight="bold",
-        )
+        total_w, total_h = 2200, 1450
+        header_h = 70
+        margin = 24
+        grid_w = (total_w - margin * 3) // 2
+        grid_h = (total_h - header_h - margin * 3) // 2
 
-        _plot_color_image(axes[0, 0], color_image, "Original Colorida (RGB)")
-        _plot_image(axes[0, 1], quantized, f"Quantizada via {technique_name}\n{info_bits}")
+        canvas = Image.new("RGB", (total_w, total_h), (22, 24, 30))
+        draw = ImageDraw.Draw(canvas)
 
-        _plot_rgb_histogram(axes[1, 0], color_image, "Histograma de Cores (RGB)")
+        title = f"Comparação Colorida vs Quantizada — {technique_name}{method_str} {info_bits}"
+        draw.text((margin, 20), title, fill=(255, 255, 255), font=f_head)
+
+        x0 = margin
+        x1 = margin * 2 + grid_w
+        y_img = header_h + margin
+        y_hist = header_h + margin * 2 + grid_h
+
+        _draw_cell_image(draw, canvas, color_image, x0, y_img, grid_w, grid_h, "Original Colorida (RGB)", f_cell)
+        _draw_cell_image(draw, canvas, quantized, x1, y_img, grid_w, grid_h, f"Quantizada via {technique_name} {info_bits}", f_cell)
+
+        _draw_cell_rgb_histogram(draw, color_image, x0, y_hist, grid_w, grid_h, "Histograma de Cores (RGB)", f_cell, f_axis)
         if is_quant_rgb:
-            _plot_rgb_histogram(axes[1, 1], quantized, f"Histograma RGB — {technique_name}")
+            _draw_cell_rgb_histogram(draw, quantized, x1, y_hist, grid_w, grid_h, f"Histograma RGB — {technique_name}", f_cell, f_axis)
         else:
-            hist_quantized = compute_histogram(quantized)
-            _plot_histogram(axes[1, 1], hist_quantized, f"Histograma — {technique_name}", color="#e8624a")
+            h_q = compute_histogram(quantized)
+            _draw_cell_histogram(draw, h_q.counts, x1, y_hist, grid_w, grid_h, f"Histograma — {technique_name}", "#e8624a", f_cell, f_axis)
 
-    plt.tight_layout()
-    figure_bytes = _figure_to_bytes(fig)
-    plt.close(fig)
-    del fig, axes
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    del canvas, draw
     gc.collect()
-    return figure_bytes
+    return buf.getvalue()
 
 
 def generate_dither_comparison_figure(
@@ -330,54 +584,65 @@ def generate_dither_comparison_figure(
     mse_dither: float | None = None,
     psnr_dither: float | None = None,
 ) -> bytes:
-    """Gera uma figura comparativa destacando Quantização Direta vs Floyd-Steinberg."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    """Gera uma figura comparativa em Ultra-HD destacando Quantização Direta vs Floyd-Steinberg."""
     n_tons = 2 ** bits
     is_rgb = bool(original_gray.ndim == 3 and original_gray.shape[2] >= 3)
     info_bits = f"({bits} bits / {(2**bits)**3 if is_rgb else n_tons} tons)"
     method_str = f" | {gray_method_name}" if gray_method_name and not is_rgb else (" | Modo RGB" if is_rgb else "")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
-    fig.suptitle(
-        f"Comparativo de Pós-Processamento: Direta vs Floyd-Steinberg{method_str} — {info_bits}",
-        fontsize=14,
-        fontweight="bold",
-    )
+    total_w, total_h = 3000, 1450
+    header_h = 70
+    margin = 24
+    grid_w = (total_w - margin * 4) // 3
+    grid_h = (total_h - header_h - margin * 3) // 2
+
+    canvas = Image.new("RGB", (total_w, total_h), (22, 24, 30))
+    draw = ImageDraw.Draw(canvas)
+
+    f_head = _get_font(28, bold=True)
+    f_cell = _get_font(20, bold=True)
+    f_axis = _get_font(15, bold=False)
+
+    title = f"Comparativo: Direta vs Floyd-Steinberg{method_str} — {info_bits}"
+    draw.text((margin, 20), title, fill=(255, 255, 255), font=f_head)
 
     t_dir = f"2. Quantização Direta {info_bits}"
     if mse_direct is not None and psnr_direct is not None:
-        t_dir += f"\nMSE: {mse_direct:.1f} | PSNR: {psnr_direct:.1f} dB"
+        t_dir += f" (MSE: {mse_direct:.1f} | PSNR: {psnr_direct:.1f} dB)"
 
-    t_dit = f"3. Com Floyd-Steinberg {info_bits}"
+    t_dit = f"3. Floyd-Steinberg {info_bits}"
     if mse_dither is not None and psnr_dither is not None:
-        t_dit += f"\nMSE: {mse_dither:.1f} | PSNR: {psnr_dither:.1f} dB"
+        t_dit += f" (MSE: {mse_dither:.1f} | PSNR: {psnr_dither:.1f} dB)"
 
-    _plot_image(axes[0, 0], original_gray, "1. Entrada Original (8 bits)")
-    _plot_image(axes[0, 1], direct_quantized, t_dir)
-    _plot_image(axes[0, 2], dither_quantized, t_dit)
+    x0 = margin
+    x1 = margin * 2 + grid_w
+    x2 = margin * 3 + grid_w * 2
+    y_img = header_h + margin
+    y_hist = header_h + margin * 2 + grid_h
 
+    # Linha 1: Imagens
+    _draw_cell_image(draw, canvas, original_gray, x0, y_img, grid_w, grid_h, "1. Entrada Original (8 bits)", f_cell)
+    _draw_cell_image(draw, canvas, direct_quantized, x1, y_img, grid_w, grid_h, t_dir, f_cell)
+    _draw_cell_image(draw, canvas, dither_quantized, x2, y_img, grid_w, grid_h, t_dit, f_cell)
+
+    # Linha 2: Histogramas
     if is_rgb:
-        _plot_rgb_histogram(axes[1, 0], original_gray, "Histograma RGB — Entrada")
-        _plot_rgb_histogram(axes[1, 1], direct_quantized, "Histograma RGB — Direta")
-        _plot_rgb_histogram(axes[1, 2], dither_quantized, "Histograma RGB — Floyd-Steinberg")
+        _draw_cell_rgb_histogram(draw, original_gray, x0, y_hist, grid_w, grid_h, "Histograma RGB — Entrada", f_cell, f_axis)
+        _draw_cell_rgb_histogram(draw, direct_quantized, x1, y_hist, grid_w, grid_h, "Histograma RGB — Direta", f_cell, f_axis)
+        _draw_cell_rgb_histogram(draw, dither_quantized, x2, y_hist, grid_w, grid_h, "Histograma RGB — Floyd-Steinberg", f_cell, f_axis)
     else:
-        hist_orig = compute_histogram(original_gray)
-        hist_dir = compute_histogram(direct_quantized)
-        hist_dit = compute_histogram(dither_quantized)
-        _plot_histogram(axes[1, 0], hist_orig, "Histograma — Entrada Original", color="#555555")
-        _plot_histogram(axes[1, 1], hist_dir, "Histograma — Quantização Direta", color="#4a90d9")
-        _plot_histogram(axes[1, 2], hist_dit, "Histograma — Com Floyd-Steinberg", color="#e8624a")
+        h_orig = compute_histogram(original_gray)
+        h_dir = compute_histogram(direct_quantized)
+        h_dit = compute_histogram(dither_quantized)
+        _draw_cell_histogram(draw, h_orig.counts, x0, y_hist, grid_w, grid_h, "Histograma — Entrada Original", "#555555", f_cell, f_axis)
+        _draw_cell_histogram(draw, h_dir.counts, x1, y_hist, grid_w, grid_h, "Histograma — Quantização Direta", "#4a90d9", f_cell, f_axis)
+        _draw_cell_histogram(draw, h_dit.counts, x2, y_hist, grid_w, grid_h, "Histograma — Com Floyd-Steinberg", "#e8624a", f_cell, f_axis)
 
-    plt.tight_layout()
-    figure_bytes = _figure_to_bytes(fig)
-    plt.close(fig)
-    del fig, axes
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    del canvas, draw
     gc.collect()
-    return figure_bytes
-
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -390,68 +655,3 @@ def _compute_psnr(mse: float, max_value: float = 255.0) -> float:
     if mse == 0.0:
         return float("inf")
     return float(20.0 * np.log10(max_value) - 10.0 * np.log10(mse))
-
-
-def _plot_image(ax: Any, image: np.ndarray, title: str) -> None:
-    if image.ndim == 2:
-        ax.imshow(image, cmap="gray", vmin=0, vmax=255)
-    else:
-        img_display = image[:, :, :3] if image.shape[2] >= 3 else image
-        if img_display.dtype != np.uint8 and np.issubdtype(img_display.dtype, np.floating):
-            img_display = np.clip(img_display, 0.0, 1.0)
-        ax.imshow(img_display)
-    ax.set_title(title, fontsize=11)
-    ax.axis("off")
-
-
-def _plot_color_image(ax: Any, image: np.ndarray, title: str) -> None:
-    img_display = image[:, :, :3] if image.ndim == 3 and image.shape[2] >= 3 else image
-    if img_display.dtype != np.uint8 and np.issubdtype(img_display.dtype, np.floating):
-        img_display = np.clip(img_display, 0.0, 1.0)
-    ax.imshow(img_display)
-    ax.set_title(title, fontsize=11)
-    ax.axis("off")
-
-
-def _plot_histogram(ax: Any, hist: HistogramData, title: str, color: str) -> None:
-    ax.bar(
-        hist.bin_edges[:-1],
-        hist.counts,
-        width=1.0,
-        color=color,
-        alpha=0.85,
-    )
-    ax.set_title(title, fontsize=11)
-    ax.set_xlim([0, 256])
-    ax.set_xlabel("Intensidade")
-    ax.set_ylabel("Frequência (Pixels)")
-
-
-def _plot_rgb_histogram(ax: Any, image: np.ndarray, title: str) -> None:
-    if image.ndim == 2:
-        hist = compute_histogram(image)
-        _plot_histogram(ax, hist, title, color="#555555")
-        return
-
-    colors = ("#e53935", "#43a047", "#1e88e5")
-    labels = ("R", "G", "B")
-    img_rgb = image[:, :, :3]
-    if img_rgb.dtype != np.uint8 and np.issubdtype(img_rgb.dtype, np.floating):
-        img_rgb = (np.clip(img_rgb, 0.0, 1.0) * 255).astype(np.uint8)
-
-    for i, (col, lbl) in enumerate(zip(colors, labels)):
-        counts, bin_edges = np.histogram(img_rgb[:, :, i].ravel(), bins=256, range=(0, 256))
-        ax.plot(bin_edges[:-1], counts, color=col, label=lbl, alpha=0.85, linewidth=1.5)
-
-    ax.set_title(title, fontsize=11)
-    ax.set_xlim([0, 256])
-    ax.set_xlabel("Intensidade (0–255)")
-    ax.set_ylabel("Frequência")
-    ax.legend(loc="upper right", fontsize=9)
-
-
-def _figure_to_bytes(fig: Any) -> bytes:
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
-    buffer.seek(0)
-    return buffer.read()

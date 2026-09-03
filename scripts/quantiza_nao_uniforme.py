@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from skimage import io
+from PIL import Image
+import numpy as np
 
 from src.core.grayscale import GrayscaleMethod, to_grayscale
 from src.core.quantization import QuantizationTechnique, quantize, technique_label
@@ -37,7 +38,8 @@ def main(image_path: str, bits: int) -> None:
         sys.exit(1)
 
     print(f"Carregando imagem: {source.name}")
-    image_array = io.imread(str(source))
+    with Image.open(source) as img:
+        image_array = np.array(img)
     print(f"  Formato original : {image_array.shape} | dtype: {image_array.dtype}")
 
     print("Convertendo para escala de cinza (ITU-R BT.601)...")
@@ -50,7 +52,7 @@ def main(image_path: str, bits: int) -> None:
     quantized = quantize(gray, bits=bits, technique=QuantizationTechnique.KMEANS)
 
     output_path = source.parent / f"{source.stem}_kmeans_{bits}bits.png"
-    io.imsave(str(output_path), quantized)
+    Image.fromarray(quantized).save(output_path)
 
     print(f"\nImagem salva em : {output_path}")
     print(f"  Níveis únicos  : {len(set(quantized.ravel()))}")

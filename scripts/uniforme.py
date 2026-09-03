@@ -19,7 +19,7 @@ from pathlib import Path
 # Adiciona o diretório raiz do projeto ao path para que os módulos src/ sejam encontrados
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from skimage import io
+from PIL import Image
 
 from src.core.grayscale import GrayscaleMethod, to_grayscale
 from src.core.histogram import calculate_metrics
@@ -40,7 +40,8 @@ def main(image_path: str, bits: int) -> None:
         sys.exit(1)
 
     print(f"Carregando imagem: {source.name}")
-    image_array = io.imread(str(source))
+    with Image.open(source) as img:
+        image_array = np.array(img)
     print(f"  Formato original : {image_array.shape} | dtype: {image_array.dtype}")
 
     print("Convertendo para escala de cinza (ITU-R BT.601)...")
@@ -54,7 +55,7 @@ def main(image_path: str, bits: int) -> None:
     metrics = calculate_metrics(gray, quantized, bits)
 
     output_path = source.parent / f"{source.stem}_uniforme_{bits}bits.png"
-    io.imsave(str(output_path), quantized)
+    Image.fromarray(quantized).save(output_path)
 
     print(f"\nImagem salva em : {output_path}")
     print(f"  MSE            : {metrics.mse:.4f}")

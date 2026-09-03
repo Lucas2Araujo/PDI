@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from skimage import io
+from PIL import Image
+import numpy as np
 
 from src.core.grayscale import GrayscaleMethod, to_grayscale
 from src.core.histogram import calculate_metrics, generate_full_comparison_figure
@@ -39,7 +40,8 @@ def main(image_path: str, bits: int) -> None:
 
     n_tons = 2 ** bits
     print(f"Carregando imagem: {source.name}")
-    image_array = io.imread(str(source))
+    with Image.open(source) as img:
+        image_array = np.array(img)
 
     print("Convertendo para escala de cinza (ITU-R BT.601)...")
     gray = to_grayscale(image_array, method=GrayscaleMethod.LUMINANCE)

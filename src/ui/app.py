@@ -9,12 +9,14 @@ Define a estrutura raiz da interface:
 Ponto de entrada da UI chamado por main.py.
 """
 
+import time
 from pathlib import Path
 from typing import Callable
 
 import flet as ft
 
 from src.ui import theme
+from src.ui.components.loading_screen import LoadingScreen
 from src.ui.views.batch_view import BatchView
 from src.ui.views.single_view import SingleView
 
@@ -25,20 +27,35 @@ APP_TITLE = "PDI — Quantização de Imagens"
 
 def build_app(page: ft.Page) -> None:
     """
-    Configura e constrói toda a interface gráfica do aplicativo.
-
-    Este é o callback principal passado para `ft.app()`. Ele recebe a
-    instância de `ft.Page` e é responsável por definir o tema, o layout
-    e todos os componentes de nível raiz.
+    Configura e constrói toda a interface gráfica do aplicativo com tela de loading inicial.
 
     Args:
         page: Instância da página Flet gerenciada pelo framework.
     """
     _configure_page(page)
 
-    single_view = SingleView(page)
-    batch_view = BatchView(page)
+    # 1. Renderiza imediatamente a tela de loading síncrona
+    loading = LoadingScreen(page)
+    page.add(loading)
+    loading.set_progress(15, "Carregando configurações de tema e viewport...")
+    time.sleep(0.04)
 
+    # 2. Inicialização dos componentes centrais
+    loading.set_progress(35, "Preparando módulos de processamento e quantização...")
+    time.sleep(0.04)
+
+    # 3. Instancia a view de processamento individual
+    loading.set_progress(60, "Carregando módulo de imagem individual...")
+    single_view = SingleView(page)
+    time.sleep(0.04)
+
+    # 4. Instancia a view de processamento em lote
+    loading.set_progress(80, "Carregando módulo de processamento em lote...")
+    batch_view = BatchView(page)
+    time.sleep(0.04)
+
+    # 5. Montagem das abas e cabeçalho
+    loading.set_progress(95, "Montando layout responsivo...")
     t1 = ft.Tab(label="Imagem Individual", icon=ft.Icons.IMAGE)
     t2 = ft.Tab(label="Processamento em Lote", icon=ft.Icons.BURST_MODE)
 
@@ -86,6 +103,11 @@ def build_app(page: ft.Page) -> None:
 
     page.on_resized = _on_page_resize
 
+    loading.set_progress(100, "Pronto! Inicializando interface...")
+    time.sleep(0.06)
+
+    # 6. Transição da tela de loading para a interface definitiva
+    page.controls.clear()
     page.add(
         header_container,
         ft.Divider(height=1),
@@ -98,6 +120,7 @@ def build_app(page: ft.Page) -> None:
         single_view.update_responsive_layout(p_w, p_h)
     if hasattr(batch_view, "update_responsive_layout"):
         batch_view.update_responsive_layout(p_w, p_h)
+    page.update()
 
 
 # ---------------------------------------------------------------------------

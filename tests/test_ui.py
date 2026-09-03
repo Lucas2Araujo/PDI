@@ -483,6 +483,30 @@ class TestDynamicTabsAndZipExport(unittest.TestCase):
         self.assertIn("uniforme_2bits.png", name_u)
 
 
+class TestLoadingScreen(unittest.TestCase):
+    """Testes para o componente de carregamento inicial síncrono."""
+
+    def test_loading_screen_progress_updates(self) -> None:
+        from unittest.mock import MagicMock
+        from src.ui.components.loading_screen import LoadingScreen
+
+        mock_page = MagicMock(spec=ft.Page)
+        loading = LoadingScreen(mock_page)
+
+        self.assertIsInstance(loading, ft.Container)
+        self.assertEqual(loading._percent_text.value, "0%")
+
+        loading.set_progress(45.5, "Processando módulos...")
+        self.assertEqual(loading._percent_text.value, "45%")
+        self.assertAlmostEqual(loading._progress_bar.value, 0.455)
+        self.assertEqual(loading._status_text.value, "Processando módulos...")
+        mock_page.update.assert_called()
+
+        loading.set_progress(100.0, "Concluído!")
+        self.assertEqual(loading._percent_text.value, "100%")
+        self.assertAlmostEqual(loading._progress_bar.value, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
