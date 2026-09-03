@@ -17,10 +17,11 @@ Permite ao usuário:
   - Salvar/Baixar o resultado em disco ou navegador.
 """
 
+import asyncio
 import gc
 from pathlib import Path
 import threading
-from typing import Callable
+from typing import Any, Callable
 
 import flet as ft
 import numpy as np
@@ -125,9 +126,15 @@ class SingleView(ft.Column):
         self._active_view_mode: str = "graph"
         self._active_single_algo: str = "kmeans"
         self._is_processing: bool = False
+        self._background_tasks: set[asyncio.Task] = set()
 
         self._build_controls()
         self._assemble_layout()
+
+    @property
+    def _image_stem(self) -> str:
+        """Retorna o stem (nome base sem extensão) da imagem selecionada ou fallback padrão."""
+        return self._source_path.stem if self._source_path else "imagem"
 
     # -----------------------------------------------------------------------
     # Construção Modular dos Controles
@@ -184,7 +191,7 @@ class SingleView(ft.Column):
             on_click=lambda _: self._open_zoom_dialog(
                 f"Imagem de Entrada Original — {self._input_name_text.value}",
                 self._input_image_bytes,
-                default_filename=f"{(self._source_path.stem if self._source_path else 'imagem')}_original.png",
+                default_filename=f"{self._image_stem}_original.png",
             ),
             bgcolor=theme.PRIMARY_LIGHT,
             color="#FFFFFF",
@@ -194,7 +201,7 @@ class SingleView(ft.Column):
             icon=ft.Icons.DOWNLOAD,
             on_click=lambda _: self._trigger_download(
                 self._input_image_bytes,
-                f"{(self._source_path.stem if self._source_path else 'imagem')}_original.png",
+                f"{self._image_stem}_original.png",
             ),
         )
 
@@ -208,7 +215,7 @@ class SingleView(ft.Column):
                         on_click=lambda _: self._open_zoom_dialog(
                             f"Imagem de Entrada Original — {self._input_name_text.value}",
                             self._input_image_bytes,
-                            default_filename=f"{(self._source_path.stem if self._source_path else 'imagem')}_original.png",
+                            default_filename=f"{self._image_stem}_original.png",
                         ),
                         ink=True,
                         tooltip="Clique para abrir a foto original no pop-up de zoom",
@@ -1157,12 +1164,13 @@ class SingleView(ft.Column):
         if hasattr(self._page, "run_task"):
             self._page.run_task(_runner)
         else:
-            import asyncio
-            asyncio.create_task(_runner())
+            task = asyncio.create_task(_runner())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _get_active_figure_bytes_and_name(self) -> tuple[bytes | None, str]:
         """Retorna os bytes e nome de arquivo para a figura analítica exibida."""
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._active_view_mode == "color_graph" and self._color_figure_bytes:
             return self._color_figure_bytes, f"{stem}_painel_colorido_{self._bits_value}bits.png"
         if self._active_view_mode == "dither_comp" and self._dither_figure_bytes:
@@ -1178,7 +1186,7 @@ class SingleView(ft.Column):
 
     def _get_active_single_bytes_and_name(self) -> tuple[bytes | None, str]:
         """Retorna os bytes e nome de arquivo para o modo 'Apenas Quantizada'."""
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._selected_technique_key == "BOTH":
             if self._active_single_algo == "kmeans" and self._quantized_image_bytes:
                 return self._quantized_image_bytes, f"{stem}_kmeans_{self._bits_value}bits.png"
@@ -1220,7 +1228,7 @@ class SingleView(ft.Column):
 
     def _get_side_orig_bytes_and_name(self) -> tuple[bytes | None, str]:
         """Retorna os bytes e nome de arquivo para o slot 1 da comparação lado a lado."""
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._selected_technique_key == "BOTH" and self._active_view_mode == "side_unif_kmeans":
             return self._direct_quantized_bytes, f"{stem}_uniforme_{self._bits_value}bits.png"
         if self._active_view_mode in ("color_side", "color_graph") and self._color_image_bytes:
@@ -1242,7 +1250,7 @@ class SingleView(ft.Column):
 
     def _get_side_quant_bytes_and_name(self) -> tuple[bytes | None, str]:
         """Retorna os bytes e nome de arquivo para o slot 2 da comparação lado a lado."""
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._selected_technique_key == "BOTH":
             if self._active_view_mode == "orig_uniform":
                 return self._direct_quantized_bytes, f"{stem}_uniforme_{self._bits_value}bits.png"
@@ -1266,7 +1274,7 @@ class SingleView(ft.Column):
         self._trigger_download(data, name)
 
     def _get_triple_col1_bytes_and_name(self) -> tuple[bytes | None, str]:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         data = self._color_image_bytes or self._input_image_bytes or self._gray_image_bytes
         return data, f"{stem}_painel1_original.png"
 
@@ -1280,7 +1288,7 @@ class SingleView(ft.Column):
         self._trigger_download(data, name)
 
     def _get_triple_col2_bytes_and_name(self) -> tuple[bytes | None, str]:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._selected_technique_key == "BOTH":
             return self._direct_quantized_bytes, f"{stem}_painel2_uniforme_{self._bits_value}bits.png"
         if not self._convert_to_gray:
@@ -1297,7 +1305,7 @@ class SingleView(ft.Column):
         self._trigger_download(data, name)
 
     def _get_triple_col3_bytes_and_name(self) -> tuple[bytes | None, str]:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         if self._selected_technique_key == "BOTH":
             return self._quantized_image_bytes, f"{stem}_painel3_kmeans_{self._bits_value}bits.png"
         if not self._convert_to_gray:
@@ -1314,7 +1322,7 @@ class SingleView(ft.Column):
         self._trigger_download(data, name)
 
     def _open_dither_direct_zoom(self) -> None:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         self._open_zoom_dialog(
             self._direct_comp_label.value or "Quantização Direta",
             self._direct_quantized_bytes,
@@ -1322,11 +1330,11 @@ class SingleView(ft.Column):
         )
 
     def _download_dither_direct(self) -> None:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         self._trigger_download(self._direct_quantized_bytes, f"{stem}_quantizada_direta_{self._bits_value}bits.png")
 
     def _open_dither_fs_zoom(self) -> None:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         self._open_zoom_dialog(
             self._dither_comp_label.value or "Com Dithering Floyd-Steinberg",
             self._dither_image_bytes,
@@ -1334,7 +1342,7 @@ class SingleView(ft.Column):
         )
 
     def _download_dither_fs(self) -> None:
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         self._trigger_download(self._dither_image_bytes, f"{stem}_floyd_steinberg_{self._bits_value}bits.png")
 
     def _open_orig_chart_zoom(self) -> None:
@@ -1421,7 +1429,7 @@ class SingleView(ft.Column):
         import io
         import zipfile
         buf = io.BytesIO()
-        stem = self._source_path.stem if self._source_path else "imagem"
+        stem = self._image_stem
         zip_filename = f"{stem}_comparações_{self._bits_value}bits.zip"
 
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -2131,14 +2139,47 @@ class SingleView(ft.Column):
         if self._active_view_mode == "dither_comp":
             self._update_metrics_dither_comparison(m_direct, m_dither, elapsed)
 
-        if self._active_view_mode == "dither_comp":
-            self._update_metrics_dither_comparison(m_direct, m_dither, elapsed)
+    async def _on_save(self, _: ft.ControlEvent) -> None:
+        """Salva a imagem quantizada ativa selecionada."""
+        stem = self._image_stem
+        data_to_save, default_name = self._get_active_single_bytes_and_name()
+        if data_to_save is None:
+            data_to_save = self._quantized_image_bytes or self._gray_image_bytes
+            default_name = f"{stem}_quantizada_{self._bits_value}bits.png"
 
-    async def _on_convert_and_save_gray(self, _: ft.ControlEvent) -> None:
-        """Converte a imagem diretamente para tons de cinza ou canal isolado (8 bits)."""
+        try:
+            save_path = await self._save_picker.save_file(
+                dialog_title="Salvar Imagem Quantizada",
+                file_name=default_name,
+                allowed_extensions=["png"],
+                src_bytes=data_to_save,
+            )
+            if save_path and not getattr(self._page, "web", False):
+                Path(save_path).write_bytes(data_to_save)
+            self._show_message(f"✅ Arquivo '{default_name}' salvo com sucesso!", theme.SUCCESS)
+        except Exception as exc:
+            self._show_message(f"Erro ao salvar arquivo: {exc}", theme.ACCENT)
+
+    def _on_convert_and_save_gray(self, _: ft.ControlEvent) -> None:
+        """Converte a imagem diretamente para tons de cinza ou canal isolado (8 bits) e salva sem quantização."""
         if self._source_path is None and self._loaded_array is None:
-            self._show_message("Selecione uma imagem de teste primeiro.", theme.WARNING)
             return
+
+        async def _save_gray_task():
+            await self._execute_convert_and_save_gray()
+
+        if hasattr(self._page, "run_task"):
+            self._page.run_task(_save_gray_task)
+        else:
+            task = asyncio.create_task(_save_gray_task())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _execute_convert_and_save_gray(self) -> None:
+        """Rotina assíncrona para geração e salvamento da imagem pré-processada em 8 bits."""
+        self._set_processing_state(True)
+        self._progress_label.value = "Convertendo imagem para 8 bits..."
+        self._page.update()
 
         try:
             image_array = (
@@ -2150,16 +2191,15 @@ class SingleView(ft.Column):
             self._is_color = bool(image_array.ndim == 3 and image_array.shape[2] >= 3)
             gray = to_grayscale(image_array, method=self._selected_gray_method)
 
+            stem = self._image_stem
             if is_channel_isolation(self._selected_gray_method):
                 display_gray = isolate_channel_rgb(image_array, self._selected_gray_method)
                 ch_name = get_channel_color_name(self._selected_gray_method).lower()
-                stem = self._source_path.stem if self._source_path else "imagem"
                 default_name = f"{stem}_canal_{ch_name}_8bits.png"
                 dialog_title = f"Salvar Canal {ch_name.capitalize()} Isolado"
                 success_msg = f"Canal {ch_name.capitalize()} isolado salvo com sucesso!"
             else:
                 display_gray = gray
-                stem = self._source_path.stem if self._source_path else "imagem"
                 method_str = self._selected_gray_method.name.lower()
                 default_name = f"{stem}_cinza_{method_str}_8bits.png"
                 dialog_title = "Salvar Imagem em Tons de Cinza"
