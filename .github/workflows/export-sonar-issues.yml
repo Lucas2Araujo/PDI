@@ -17,11 +17,11 @@ jobs:
       - name: Buscar e Formatar Issues do SonarQube
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_ISSUES_URL: ${{ secrets.SONAR_ISSUES_URL }}
+          SONAR_ISSUES_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           # 1. Valida se as secrets foram configuradas
-          if [ -z "$SONAR_ISSUES_URL" ]; then
-            echo "::error::A secret SONAR_ISSUES_URL está vazia ou não foi configurada como Repository Secret!"
+          if [ -z "$SONAR_HOST_URL" ]; then
+            echo "::error::A secret SONAR_HOST_URL está vazia ou não foi configurada como Repository Secret!"
             exit 1
           fi
 
@@ -33,7 +33,7 @@ jobs:
           echo "Buscando apontamentos a partir da URL configurada..."
 
           # 2. Faz a requisição seguindo redirects (-L) e captura o código HTTP
-          HTTP_STATUS=$(curl -sSL -w "%{http_code}" -u "${SONAR_TOKEN}:" "${SONAR_ISSUES_URL}" -o raw_response.json)
+          HTTP_STATUS=$(curl -sSL -w "%{http_code}" -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL}" -o raw_response.json)
           echo "Status HTTP retornado: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" -ne 200 ]; then
