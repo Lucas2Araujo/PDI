@@ -16,18 +16,19 @@ from typing import Callable
 import flet as ft
 
 from src.ui import theme
+from src.ui.app_layout import AppLayout
 from src.ui.components.loading_screen import LoadingScreen
 from src.ui.views.batch_view import BatchView
 from src.ui.views.single_view import SingleView
 
 # Versão atual do aplicativo
 APP_VERSION = "0.4"
-APP_TITLE = "PDI — Quantização de Imagens"
+APP_TITLE = "PDI — Studio Digital"
 
 
 def build_app(page: ft.Page) -> None:
     """
-    Configura e constrói toda a interface gráfica do aplicativo com tela de loading inicial.
+    Configura e constrói toda a interface gráfica do aplicativo utilizando o shell unificado AppLayout.
 
     Args:
         page: Instância da página Flet gerenciada pelo framework.
@@ -37,89 +38,36 @@ def build_app(page: ft.Page) -> None:
     # 1. Renderiza imediatamente a tela de loading síncrona
     loading = LoadingScreen(page)
     page.add(loading)
-    loading.set_progress(15, "Carregando configurações de tema e viewport...")
+    loading.set_progress(20, "Carregando configurações de tema e viewport...")
     time.sleep(0.04)
 
-    # 2. Inicialização dos componentes centrais
-    loading.set_progress(35, "Preparando módulos de processamento e quantização...")
+    # 2. Inicialização do AppLayout
+    loading.set_progress(50, "Inicializando módulos didáticos e studio responsivo...")
+    app_layout = AppLayout(page=page)
     time.sleep(0.04)
 
-    # 3. Instancia a view de processamento individual
-    loading.set_progress(60, "Carregando módulo de imagem individual...")
-    single_view = SingleView(page)
-    time.sleep(0.04)
-
-    # 4. Instancia a view de processamento em lote
-    loading.set_progress(80, "Carregando módulo de processamento em lote...")
-    batch_view = BatchView(page)
-    time.sleep(0.04)
-
-    # 5. Montagem das abas e cabeçalho
-    loading.set_progress(95, "Montando layout responsivo...")
-    t1 = ft.Tab(label="Imagem Individual", icon=ft.Icons.IMAGE)
-    t2 = ft.Tab(label="Processamento em Lote", icon=ft.Icons.BURST_MODE)
-
+    # 3. Configuração de listeners de redimensionamento responsivo
+    loading.set_progress(85, "Configurando listeners de viewport e telemetria...")
     p_w = getattr(page, "width", None)
     p_h = getattr(page, "height", None)
-
-    v1 = ft.Container(
-        content=single_view,
-        padding=theme.get_page_padding(p_w),
-        expand=True,
-    )
-    v2 = ft.Container(
-        content=batch_view,
-        padding=theme.get_page_padding(p_w),
-        expand=True,
-    )
-
-    tab_bar = ft.TabBar(tabs=[t1, t2])
-    tab_view = ft.TabBarView(controls=[v1, v2], expand=True)
-
-    tabs = ft.Tabs(
-        length=2,
-        selected_index=0,
-        expand=True,
-        content=ft.Column(
-            controls=[tab_bar, tab_view],
-            expand=True,
-        ),
-    )
-
-    header_container, update_header_layout = _build_header(page)
 
     def _on_page_resize(_: ft.ControlEvent) -> None:
         cur_w = getattr(page, "width", None)
         cur_h = getattr(page, "height", None)
-        pad = theme.get_page_padding(cur_w)
-        v1.padding = pad
-        v2.padding = pad
-        update_header_layout(cur_w)
-        if hasattr(single_view, "update_responsive_layout"):
-            single_view.update_responsive_layout(cur_w, cur_h)
-        if hasattr(batch_view, "update_responsive_layout"):
-            batch_view.update_responsive_layout(cur_w, cur_h)
+        app_layout.handle_resize(cur_w, cur_h)
         page.update()
 
     page.on_resized = _on_page_resize
 
     loading.set_progress(100, "Pronto! Inicializando interface...")
-    time.sleep(0.06)
+    time.sleep(0.04)
 
-    # 6. Transição da tela de loading para a interface definitiva
+    # 4. Transição da tela de loading para a interface definitiva
     page.controls.clear()
-    page.add(
-        header_container,
-        ft.Divider(height=1),
-        tabs,
-    )
+    page.add(app_layout)
 
-    # Inicializa layout responsivo nas views e no cabeçalho
-    update_header_layout(p_w)
-    if hasattr(single_view, "update_responsive_layout"):
-        single_view.update_responsive_layout(p_w, p_h)
-    if hasattr(batch_view, "update_responsive_layout"):
-        batch_view.update_responsive_layout(p_w, p_h)
+    # Inicializa layout responsivo no AppLayout
+    app_layout.handle_resize(p_w, p_h)
     page.update()
 
 

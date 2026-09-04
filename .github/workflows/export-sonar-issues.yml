@@ -1,0 +1,49 @@
+name: Export SonarQube Issues for Antigravity
+
+on:
+  workflow_dispatch: # Botão "Run workflow" manual no GitHub
+
+permissions:
+  contents: write # Necessário para commitar o arquivo de volta no repositório
+
+jobs:
+  export-issues:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Buscar e Formatar Issues do SonarQube
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ISSUES_URL: ${{ secrets.SONAR_ISSUES_URL }}
+        run: |
+          # Faz a requisição usando a URL completa e formata com jq
+          curl -s -u "${SONAR_TOKEN}:" "${SONAR_ISSUES_URL}" \
+            | jq '[.issues[] | {
+                file: (.component | split(":") | last),
+                line: .line,
+                rule: .rule,
+                severity: .severity,
+                type: .type,
+                message: .message
+              }]' > sonar_issues.json
+
+          echo "Total de apontamentos encontrados: $(jq '. | length' sonar_issues.json)"
+
+      - name: Salvar sonar_issues.json no Repositório
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add sonar_issues.json
+          
+          # Só commita se houver alterações no arquivo
+          if git diff --staged --quiet; then
+            echo "Nenhuma alteração encontrada nos apontamentos."
+          else
+            git commit -m "chore: atualiza relatório sonar_issues.json para o Antigravity"
+            git push
+          fi
+
