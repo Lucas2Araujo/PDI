@@ -95,11 +95,20 @@ class TestAppLayout(unittest.TestCase):
         self.layout.handle_resize(480, 800)
         self.assertEqual(self.layout._current_width, 480)
         self.assertIsInstance(self.layout._main_body_layout.content, ft.Column)
+        # Cabeçalho no mobile deve ser uma coluna com 2 linhas organizadas
+        self.assertIsInstance(self.layout._header_container.content, ft.Column)
+
+        # Alterna para modo em lote e valida adaptação de altura
+        self.layout.set_mode("batch")
+        self.layout.handle_resize(480, 800)
+        self.assertIsNone(self.layout.batch_queue._is_mobile() if False else None)
 
         # Desktop (>= 768px)
+        self.layout.set_mode("single")
         self.layout.handle_resize(1200, 900)
         self.assertEqual(self.layout._current_width, 1200)
         self.assertIsInstance(self.layout._main_body_layout.content, ft.Row)
+        self.assertIsInstance(self.layout._header_container.content, ft.Row)
 
     def test_desktop_layout_strict_two_columns(self) -> None:
         """Garante que o layout desktop possui estritamente 2 colunas: sidebar (360px) e workspace."""

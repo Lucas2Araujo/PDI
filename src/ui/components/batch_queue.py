@@ -223,9 +223,23 @@ class BatchQueue(ft.Container):
             self._count_badge.value = text
         self._safe_update()
 
+    def update_responsive_layout(self, width: float | None = None, height: float | None = None) -> None:
+        """Atualiza a renderização de layout do BatchQueue com base nas dimensões da tela."""
+        self._page_width = width
+        self._page_height = height
+        self._render_queue()
+
     # -----------------------------------------------------------------------
     # Renderização da Grade
     # -----------------------------------------------------------------------
+
+    def _is_mobile(self) -> bool:
+        if getattr(self, "_page_width", None) is not None:
+            return float(self._page_width) < 600
+        page = self._get_active_page()
+        if page is not None and getattr(page, "width", None) is not None:
+            return float(page.width) < 600
+        return False
 
     def _open_zoom(self, item: BatchQueueItem) -> None:
         page = self._get_active_page()
@@ -240,12 +254,13 @@ class BatchQueue(ft.Container):
         count = len(self._items)
         self.visible = count > 0
         self._count_badge.value = f"{count} item{'s' if count != 1 else ''} na fila"
+        is_mob = self._is_mobile()
 
         for item in self._items:
             img_ctrl = ft.Image(
                 src=_bytes_to_data_uri(item.thumb_bytes),
-                width=64,
-                height=64,
+                width=56 if is_mob else 64,
+                height=56 if is_mob else 64,
                 fit=getattr(ft.BoxFit, "COVER", None) if hasattr(ft, "BoxFit") else None,
                 border_radius=6,
             )
@@ -272,7 +287,7 @@ class BatchQueue(ft.Container):
                 on_click=lambda _, it=item: self._open_zoom(it),
             )
 
-            # Card fluido e sem largura fixa rígida (> 300)
+            # Card fluido no mobile ou largura fixa compacta no desktop
             item_card = ft.Container(
                 content=ft.Row(
                     controls=[
@@ -308,7 +323,8 @@ class BatchQueue(ft.Container):
                 border_radius=8,
                 padding=8,
                 border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft, "Border") else None,
-                width=240,
+                width=None if is_mob else 240,
+                expand=is_mob,
             )
 
             self._grid_container.controls.append(item_card)

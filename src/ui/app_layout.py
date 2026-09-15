@@ -59,8 +59,10 @@ class AppLayout(ft.Container):
         self._page = page
         self.session_state = session_state or get_session_state()
         self.is_batch_mode: bool = False
-        self._current_width: float | None = getattr(page, "width", 1200) if page else 1200
-        self._current_height: float | None = getattr(page, "height", 800) if page else 800
+        p_w = getattr(page, "width", None) if page else None
+        p_h = getattr(page, "height", None) if page else None
+        self._current_width: float | None = p_w if p_w is not None else 1200
+        self._current_height: float | None = p_h if p_h is not None else 800
 
         # FilePickers adicionais para Lote e Exportação
         self._file_picker_batch = ft.FilePicker()
@@ -445,7 +447,7 @@ class AppLayout(ft.Container):
                 p.theme_mode = {"light": ft.ThemeMode.LIGHT, "dark": ft.ThemeMode.DARK}.get(mode_str, ft.ThemeMode.SYSTEM)
                 p.update()
 
-        theme_selector = ft.SegmentedButton(
+        self._theme_selector = ft.SegmentedButton(
             segments=[
                 ft.Segment(value="system", label=ft.Text("Auto", size=theme.FONT_CAPTION), icon=ft.Icon(ft.Icons.BRIGHTNESS_AUTO, size=16)),
                 ft.Segment(value="light", label=ft.Text("Claro", size=theme.FONT_CAPTION), icon=ft.Icon(ft.Icons.LIGHT_MODE, size=16)),
@@ -456,18 +458,71 @@ class AppLayout(ft.Container):
             show_selected_icon=False,
         )
 
+        self._brand_row = brand_row
+        self._history_controls = history_controls
+
         self._header_container = ft.Container(
-            content=ft.Row(
+            content=self._build_header_content(is_mobile=bool(self._current_width is not None and self._current_width < 768)),
+            bgcolor=ft.Colors.SURFACE_CONTAINER,
+            padding=ft.Padding.symmetric(horizontal=10 if (self._current_width is not None and self._current_width < 768) else 14, vertical=8) if hasattr(ft, "Padding") else 8,
+            border=ft.Border(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)) if hasattr(ft, "Border") else None,
+        )
+        return self._header_container
+
+    def _build_header_content(self, is_mobile: bool) -> ft.Control:
+        """Gera o layout interno do cabeçalho de acordo com a largura da tela."""
+        if is_mobile:
+            # Layout Mobile: 2 Linhas Compactas e Organizadas
+            top_line = ft.Row(
                 controls=[
-                    brand_row,
+                    self._brand_row,
+                    ft.Row(
+                        controls=[
+                            self._segmented_mode,
+                            self._theme_selector,
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        wrap=True,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                wrap=True,
+            )
+
+            bottom_actions = ft.Row(
+                controls=[
+                    ft.Container(
+                        content=self._btn_execute,
+                        expand=True,
+                    ),
+                    self._btn_promote,
+                    self._history_controls,
+                    self._btn_export,
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+            return ft.Column(
+                controls=[top_line, bottom_actions],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            )
+        else:
+            # Layout Desktop: Linha única com espaçamento uniforme
+            return ft.Row(
+                controls=[
+                    self._brand_row,
                     ft.Row(
                         controls=[
                             self._segmented_mode,
                             self._btn_execute,
                             self._btn_promote,
-                            history_controls,
+                            self._history_controls,
                             self._btn_export,
-                            theme_selector,
+                            self._theme_selector,
                         ],
                         spacing=10,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -476,12 +531,7 @@ class AppLayout(ft.Container):
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            padding=ft.Padding.symmetric(horizontal=14, vertical=10) if hasattr(ft, "Padding") else 10,
-            border=ft.Border(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)) if hasattr(ft, "Border") else None,
-        )
-        return self._header_container
+            )
 
     def _build_sidebar_controls(self) -> None:
         """Monta o seletor de módulos e a lista de controles da barra lateral."""
@@ -909,8 +959,14 @@ class AppLayout(ft.Container):
         self._current_height = height
         is_mobile = bool(width is not None and width < 768)
 
+        # Atualiza o cabeçalho de acordo com o modo mobile/desktop
+        if self._header_container is not None:
+            self._header_container.content = self._build_header_content(is_mobile=is_mobile)
+            self._header_container.padding = ft.Padding.symmetric(horizontal=8 if is_mobile else 14, vertical=8) if hasattr(ft, "Padding") else 8
+
         # Repassa redimensionamento para os componentes filhos
         self.canvas.update_responsive_layout(width, height)
+        self.batch_queue.update_responsive_layout(width, height)
         self.telemetry.update_responsive_layout(width, height)
 
         if is_mobile:
@@ -964,13 +1020,16 @@ class AppLayout(ft.Container):
                 expanded=False,
             )
 
+            # Para o workspace no mobile: no modo lote, deixa expandir livremente; no modo individual, fixa altura mínima confortável
+            ws_container = ft.Container(
+                content=self._workspace_area,
+                height=None if self.is_batch_mode else (min(int(height * 0.55), 450) if height else 380),
+                padding=6,
+            )
+
             mobile_content = ft.Column(
                 controls=[
-                    ft.Container(
-                        content=self._workspace_area,
-                        height=420,
-                        padding=8,
-                    ),
+                    ws_container,
                     mobile_module_tile,
                     mobile_inputs_tile,
                     ft.Container(

@@ -102,9 +102,9 @@ def open_zoom_dialog(
 
     p_w = getattr(page, "width", None) or 800
     p_h = getattr(page, "height", None) or 600
-    dlg_w = min(int(p_w * 0.92), 960)
-    dlg_h = min(int(p_h * 0.72), 580)
     is_mob = theme.is_mobile(p_w)
+    dlg_w = min(int(p_w * 0.96) if is_mob else int(p_w * 0.92), 960)
+    dlg_h = min(int(p_h * 0.70) if is_mob else int(p_h * 0.72), 580)
 
     title_actions: list[ft.Control] = [
         ft.IconButton(
@@ -115,7 +115,7 @@ def open_zoom_dialog(
         ),
         ft.Container(
             content=zoom_label,
-            padding=ft.Padding.symmetric(horizontal=4) if hasattr(ft, "Padding") else 4,
+            padding=ft.Padding.symmetric(horizontal=2 if is_mob else 4) if hasattr(ft, "Padding") else 2,
             alignment=getattr(ft.Alignment, "CENTER", ft.Alignment(0, 0)) if hasattr(ft, "Alignment") else None,
         ),
         ft.IconButton(
@@ -153,21 +153,21 @@ def open_zoom_dialog(
         controls=[
             ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.ZOOM_IN, size=20 if is_mob else 24, color=theme.PRIMARY_LIGHT),
+                    ft.Icon(ft.Icons.ZOOM_IN, size=18 if is_mob else 24, color=theme.PRIMARY_LIGHT),
                     ft.Text(
                         title,
                         weight=ft.FontWeight.BOLD,
-                        size=theme.FONT_SUBTITLE if is_mob else theme.FONT_TITLE,
+                        size=theme.FONT_BODY if is_mob else theme.FONT_TITLE,
                         color=ft.Colors.ON_SURFACE,
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                 ],
-                spacing=6,
+                spacing=4 if is_mob else 6,
                 wrap=True,
             ),
             ft.Row(
                 controls=title_actions,
-                spacing=2,
+                spacing=1 if is_mob else 2,
             ),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -247,9 +247,9 @@ def open_histogram_zoom_dialog(
 
     p_w = getattr(page, "width", None) or 800
     p_h = getattr(page, "height", None) or 600
-    dlg_w = min(int(p_w * 0.92), 960)
-    dlg_h = min(int(p_h * 0.76), 620)
     is_mob = theme.is_mobile(p_w)
+    dlg_w = min(int(p_w * 0.96) if is_mob else int(p_w * 0.92), 960)
+    dlg_h = min(int(p_h * 0.72) if is_mob else int(p_h * 0.76), 620)
 
     chart = NativeHistogramChart(
         title=title,
@@ -275,14 +275,14 @@ def open_histogram_zoom_dialog(
             return ft.Container(
                 content=ft.Column(
                     controls=[
-                        ft.Text(label, size=10, color=ft.Colors.ON_SURFACE_VARIANT, weight=ft.FontWeight.BOLD),
-                        ft.Text(val, size=13, color=theme.PRIMARY_LIGHT, weight=ft.FontWeight.BOLD),
+                        ft.Text(label, size=9 if is_mob else 10, color=ft.Colors.ON_SURFACE_VARIANT, weight=ft.FontWeight.BOLD),
+                        ft.Text(val, size=11 if is_mob else 13, color=theme.PRIMARY_LIGHT, weight=ft.FontWeight.BOLD),
                     ],
                     spacing=2,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                padding=ft.Padding.symmetric(horizontal=10, vertical=6) if hasattr(ft, "Padding") else 6,
+                padding=ft.Padding.symmetric(horizontal=6 if is_mob else 10, vertical=4 if is_mob else 6) if hasattr(ft, "Padding") else 4,
                 border_radius=6,
             )
 
@@ -297,8 +297,8 @@ def open_histogram_zoom_dialog(
     dialog = ft.AlertDialog(
         modal=True,
         content_padding=12,
-        title_padding=ft.Padding.only(left=20, top=16, right=16, bottom=8) if hasattr(ft, "Padding") else 16,
-        actions_padding=ft.Padding.only(left=20, right=20, bottom=16) if hasattr(ft, "Padding") else 16,
+        title_padding=ft.Padding.only(left=12 if is_mob else 20, top=12 if is_mob else 16, right=12 if is_mob else 16, bottom=8) if hasattr(ft, "Padding") else 12,
+        actions_padding=ft.Padding.only(left=12 if is_mob else 20, right=12 if is_mob else 20, bottom=12 if is_mob else 16) if hasattr(ft, "Padding") else 12,
     )
 
     def _close_dialog(_: ft.ControlEvent | None = None) -> None:
@@ -310,11 +310,18 @@ def open_histogram_zoom_dialog(
         controls=[
             ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.BAR_CHART, size=20 if is_mob else 24, color=theme.PRIMARY_LIGHT),
-                    ft.Text(title, weight=ft.FontWeight.BOLD, size=theme.FONT_TITLE, color=ft.Colors.ON_SURFACE),
+                    ft.Icon(ft.Icons.BAR_CHART, size=18 if is_mob else 24, color=theme.PRIMARY_LIGHT),
+                    ft.Text(
+                        title,
+                        weight=ft.FontWeight.BOLD,
+                        size=theme.FONT_BODY if is_mob else theme.FONT_TITLE,
+                        color=ft.Colors.ON_SURFACE,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
                 ],
-                spacing=8,
+                spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                wrap=True,
             ),
             ft.IconButton(
                 icon=ft.Icons.CLOSE,
@@ -325,10 +332,11 @@ def open_histogram_zoom_dialog(
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        wrap=True,
     )
 
     stats_row = (
-        ft.Row(controls=stats_cards, spacing=8, wrap=True, alignment=ft.MainAxisAlignment.CENTER)
+        ft.Row(controls=stats_cards, spacing=6 if is_mob else 8, wrap=True, alignment=ft.MainAxisAlignment.CENTER)
         if stats_cards
         else ft.Container()
     )
@@ -639,14 +647,14 @@ def open_inspector_dialog(
 
     p_w = getattr(page, "width", None) or 800
     p_h = getattr(page, "height", None) or 600
-    dlg_w = min(int(p_w * 0.95), 1050)
-    dlg_h = min(int(p_h * 0.85), 680)
     is_mob = theme.is_mobile(p_w)
+    dlg_w = min(int(p_w * 0.96) if is_mob else int(p_w * 0.95), 1050)
+    dlg_h = min(int(p_h * 0.88) if is_mob else int(p_h * 0.85), 680)
 
     dialog = ft.AlertDialog(
         modal=True,
-        content_padding=ft.Padding.all(12) if hasattr(ft, "Padding") else 12,
-        actions_padding=ft.Padding.all(10) if hasattr(ft, "Padding") else 10,
+        content_padding=ft.Padding.all(8 if is_mob else 12) if hasattr(ft, "Padding") else 8,
+        actions_padding=ft.Padding.all(8 if is_mob else 10) if hasattr(ft, "Padding") else 8,
     )
 
     def _close_dialog(_: ft.ControlEvent | None = None) -> None:
@@ -666,10 +674,10 @@ def open_inspector_dialog(
             controls=[
                 ft.TabBar(
                     tabs=[
-                        ft.Tab(label="1. Matriz Original", icon=ft.Icons.GRID_ON),
-                        ft.Tab(label="2. Aritmética Cinza", icon=ft.Icons.CALCULATE),
-                        ft.Tab(label="3. Tabela de Quantização", icon=ft.Icons.TABLE_CHART),
-                        ft.Tab(label="4. Mapa de Calor (Erro)", icon=ft.Icons.LOCAL_FIRE_DEPARTMENT),
+                        ft.Tab(label="1. Matriz" if is_mob else "1. Matriz Original", icon=ft.Icons.GRID_ON),
+                        ft.Tab(label="2. Cinza" if is_mob else "2. Aritmética Cinza", icon=ft.Icons.CALCULATE),
+                        ft.Tab(label="3. Quantização" if is_mob else "3. Tabela de Quantização", icon=ft.Icons.TABLE_CHART),
+                        ft.Tab(label="4. Calor" if is_mob else "4. Mapa de Calor (Erro)", icon=ft.Icons.LOCAL_FIRE_DEPARTMENT),
                     ]
                 ),
                 ft.TabBarView(
@@ -686,20 +694,21 @@ def open_inspector_dialog(
         controls=[
             ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.ANALYTICS, size=24, color=theme.PRIMARY_LIGHT),
+                    ft.Icon(ft.Icons.ANALYTICS, size=20 if is_mob else 24, color=theme.PRIMARY_LIGHT),
                     ft.Text(
-                        "🔬 Entranhas do Processo — Raio-X Didático do Pipeline de PDI",
+                        "🔬 Entranhas do Processo" if is_mob else "🔬 Entranhas do Processo — Raio-X Didático do Pipeline de PDI",
                         weight=ft.FontWeight.BOLD,
-                        size=theme.FONT_SUBTITLE if is_mob else theme.FONT_TITLE,
+                        size=theme.FONT_BODY if is_mob else theme.FONT_TITLE,
                         color=ft.Colors.ON_SURFACE,
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                 ],
-                spacing=8,
+                spacing=6 if is_mob else 8,
                 wrap=True,
             ),
             ft.IconButton(
                 icon=ft.Icons.CLOSE,
+                icon_size=18 if is_mob else 22,
                 tooltip="Fechar",
                 on_click=_close_dialog,
             ),

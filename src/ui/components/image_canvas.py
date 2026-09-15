@@ -397,34 +397,40 @@ class ImageCanvas(ft.Container):
     # -----------------------------------------------------------------------
 
     def _build_toolbar(self) -> None:
-        """Gera os botões de alternância de modo, zoom e download."""
+        """Gera os botões de alternância de modo, zoom e download com adaptação mobile."""
+        is_mob = self._is_mobile_screen()
+
         mode_buttons = [
             ft.Button(
-                content="Resultado",
+                content="Resultado" if not is_mob else "Res",
                 icon=ft.Icons.IMAGE,
                 bgcolor=theme.PRIMARY if self.display_mode == DisplayMode.RESULT_ONLY else ft.Colors.SURFACE_CONTAINER,
                 color="#FFFFFF" if self.display_mode == DisplayMode.RESULT_ONLY else ft.Colors.ON_SURFACE,
+                tooltip="Exibir Apenas Imagem de Resultado",
                 on_click=lambda _: self.set_display_mode(DisplayMode.RESULT_ONLY),
             ),
             ft.Button(
-                content="Lado a Lado",
+                content="Lado a Lado" if not is_mob else "Lado",
                 icon=ft.Icons.COMPARE,
                 bgcolor=theme.PRIMARY if self.display_mode == DisplayMode.SIDE_BY_SIDE else ft.Colors.SURFACE_CONTAINER,
                 color="#FFFFFF" if self.display_mode == DisplayMode.SIDE_BY_SIDE else ft.Colors.ON_SURFACE,
+                tooltip="Comparação Lado a Lado (Entrada vs Resultado)",
                 on_click=lambda _: self.set_display_mode(DisplayMode.SIDE_BY_SIDE),
             ),
             ft.Button(
-                content="Triplo",
+                content="Triplo" if not is_mob else "3x",
                 icon=ft.Icons.VIEW_COLUMN,
                 bgcolor=theme.PRIMARY if self.display_mode == DisplayMode.TRIPLE else ft.Colors.SURFACE_CONTAINER,
                 color="#FFFFFF" if self.display_mode == DisplayMode.TRIPLE else ft.Colors.ON_SURFACE,
+                tooltip="Comparação Tripla (Entrada A, Intermediário, Resultado)",
                 on_click=lambda _: self.set_display_mode(DisplayMode.TRIPLE),
             ),
             ft.Button(
-                content="📊 Painel Analítico & Histogramas",
+                content="📊 Painel Analítico" if is_mob else "📊 Painel Analítico & Histogramas",
                 icon=ft.Icons.QUERY_STATS,
                 bgcolor=theme.PRIMARY if self.display_mode == DisplayMode.ANALYTICS else ft.Colors.SURFACE_CONTAINER,
                 color="#FFFFFF" if self.display_mode == DisplayMode.ANALYTICS else ft.Colors.ON_SURFACE,
+                tooltip="Painel com Imagens e Histogramas Integrados",
                 on_click=lambda _: self.set_display_mode(DisplayMode.ANALYTICS),
             ),
         ]
@@ -432,10 +438,11 @@ class ImageCanvas(ft.Container):
         if self._comparison_results:
             mode_buttons.append(
                 ft.Button(
-                    content="⚡ Comparador Quádruplo",
+                    content="⚡ Quádruplo" if is_mob else "⚡ Comparador Quádruplo",
                     icon=ft.Icons.GRID_VIEW,
                     bgcolor=theme.PRIMARY if self.display_mode == DisplayMode.COMPARISON else ft.Colors.SURFACE_CONTAINER,
                     color="#FFFFFF" if self.display_mode == DisplayMode.COMPARISON else ft.Colors.ON_SURFACE,
+                    tooltip="Comparador Quádruplo de Algoritmos",
                     on_click=lambda _: self.set_display_mode(DisplayMode.COMPARISON),
                 )
             )
@@ -446,7 +453,7 @@ class ImageCanvas(ft.Container):
                 content=ft.Row(
                     controls=[
                         ft.Icon(ft.Icons.SUBDIRECTORY_ARROW_RIGHT, size=16),
-                        ft.Text("Usar como Entrada A", size=theme.FONT_CAPTION),
+                        ft.Text("Promover" if is_mob else "Usar como Entrada A", size=theme.FONT_CAPTION),
                     ],
                     spacing=4,
                     tight=True,
@@ -479,6 +486,7 @@ class ImageCanvas(ft.Container):
         """Atualiza a renderização do canvas conforme as dimensões da viewport."""
         self._page_width = width
         self._page_height = height
+        self._build_toolbar()
         self._render_canvas()
         self._safe_update()
 
@@ -632,9 +640,9 @@ class ImageCanvas(ft.Container):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.ZOOM_IN, size=18, color=ft.Colors.WHITE),
-                    ft.Text("🔍 Ampliar Painel HD", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                    ft.Text("🔍 Ampliar" if is_mobile else "🔍 Ampliar Painel HD", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
                 ],
-                spacing=6,
+                spacing=4 if is_mobile else 6,
             ),
             bgcolor=theme.PRIMARY,
             tooltip="Ampliar Figura Analítica Completa em Resolução Ultra-HD (2200×1450)",
@@ -649,9 +657,9 @@ class ImageCanvas(ft.Container):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.DOWNLOAD, size=18),
-                    ft.Text("📥 Baixar Arquivo Único (PNG)"),
+                    ft.Text("📥 Baixar" if is_mobile else "📥 Baixar Arquivo Único (PNG)"),
                 ],
-                spacing=6,
+                spacing=4 if is_mobile else 6,
             ),
             tooltip="Baixar imagem consolidada contendo imagens e histogramas integrados",
             on_click=lambda _: self._trigger_download(),
@@ -661,11 +669,12 @@ class ImageCanvas(ft.Container):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.ANALYTICS_OUTLINED, size=18, color=ft.Colors.WHITE),
-                    ft.Text("🔬 Entranhas do Processo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                    ft.Text("🔬 Entranhas" if is_mobile else "🔬 Entranhas do Processo", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
                 ],
-                spacing=6,
+                spacing=4 if is_mobile else 6,
             ),
             bgcolor=theme.PRIMARY_DARK,
+            tooltip="Auditoria didática do pipeline (matrizes, aritmética e mapa de calor)",
             on_click=lambda _: self._open_inspector_from_canvas(),
         )
 
