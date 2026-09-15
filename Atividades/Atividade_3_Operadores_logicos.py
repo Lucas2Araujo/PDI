@@ -1,18 +1,6 @@
 """
 UNIVERSIDADE FEDERAL DO MARANHÃO (UFMA)
 Processamento Digital de Imagens (PDI)
-Trabalho: Operações Lógicas
-Aluno : Lucas Araújo Dominici
-- 1. And
-- 2. Or
-- 3. Not
-- 4. Xor
-- 5. Sub
-"""
-
-"""
-UNIVERSIDADE FEDERAL DO MARANHÃO (UFMA)
-Processamento Digital de Imagens (PDI)
 Trabalho: Operações Lógicas em Imagens Binárias Sintéticas
 Aluno : Lucas Araújo Dominici
 - 1. AND (Interseção)
@@ -98,7 +86,7 @@ def plotar_unaria(b_orig, b_res, titulo_res):
 
 
 def plotar_binarias(b1, b2, b_res, titulo_res):
-    """Exibe painel 1x3 clássico para operações de duas entradas."""
+    """Exibe painel 1x3 para operações de duas entradas."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     axes[0].imshow(b1, cmap="gray")
@@ -122,7 +110,6 @@ def main():
     print("      OPERAÇÕES LÓGICAS EM IMAGENS BINÁRIAS      ")
     print("=" * 60)
 
-    # Geração direta das matrizes booleanas sem conversão por threshold
     img_a, img_b = criar_formas_geometricas(tamanho=512)
 
     print(f"[OK] Imagem Binária A gerada: Círculo ({img_a.shape[1]}x{img_a.shape[0]})")
