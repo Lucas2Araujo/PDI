@@ -15,7 +15,6 @@ import numpy as np
 from PIL import Image
 from skimage import color, data
 
-# --- Carregamento das Imagens do skimage.data ---
 img1 = data.camera()
 img2 = data.moon()
 img3 = color.rgb2gray(data.cat()) * 255
@@ -23,7 +22,6 @@ img4 = color.rgb2gray(data.astronaut()) * 255
 img5 = data.cell()
 img6 = data.coins()
 img7 = data.page()
-
 
 def carregar_imagens(nome="camera"):
     """Carrega imagem do banco embutido ou imagem externa 'teste.png'."""
@@ -47,7 +45,6 @@ def carregar_imagens(nome="camera"):
     }
     return banco.get(nome, img1).astype(np.uint8)
 
-
 # --- 1. Algoritmo de Stretching ---
 def stretching(img_f, r_min, r_max):
     """
@@ -61,7 +58,6 @@ def stretching(img_f, r_min, r_max):
     s = ((img_f - r_min) / (r_max - r_min)) * 255.0
     return np.clip(s, 0, 255).astype(np.uint8)
 
-
 # --- 2. Linear Mapping ---
 def linear_mapping(img_f, a, b, c=0.0, d=255.0):
     """
@@ -74,7 +70,6 @@ def linear_mapping(img_f, a, b, c=0.0, d=255.0):
 
     s = c + ((d - c) / (b - a)) * (img_f - a)
     return np.clip(s, c, d).astype(np.uint8)
-
 
 # --- 3. Transformação Logarítmica ---
 def transformacao_logaritmica(img_f, r_max):
@@ -90,7 +85,6 @@ def transformacao_logaritmica(img_f, r_max):
     s = c * np.log(1.0 + img_f)
     return np.clip(s, 0, 255).astype(np.uint8)
 
-
 # --- 4. Ajuste de Contraste ---
 def ajustar_contraste(img_f, alpha=1.5):
     """
@@ -101,7 +95,6 @@ def ajustar_contraste(img_f, alpha=1.5):
     s = img_f * alpha
     return np.clip(s, 0, 255).astype(np.uint8)
 
-
 # --- 5. Ajuste de Brilho ---
 def ajustar_brilho(img_f, beta=40.0):
     """
@@ -111,7 +104,6 @@ def ajustar_brilho(img_f, beta=40.0):
     """
     s = img_f + beta
     return np.clip(s, 0, 255).astype(np.uint8)
-
 
 def plotar_comparacao_2x2(img_esq, img_dir, titulo_esq, titulo_dir):
     """
@@ -144,7 +136,6 @@ def plotar_comparacao_2x2(img_esq, img_dir, titulo_esq, titulo_dir):
     plt.tight_layout()
     plt.show()
 
-
 def selecionar_imagem():
     """Exibe o menu de imagens e permite escolher do scikit-image ou 'teste.png'."""
     imagens_disponiveis = {
@@ -173,10 +164,9 @@ def selecionar_imagem():
             return nome_chave, img
         print("[!] Opção inválida. Digite um número de 1 a 8.")
 
-
 def menu_pre_processamento(img_original):
     """
-    Menu opcional de pré-processamento para degradar/preparar a imagem didaticamente.
+    Menu opcional de pré-processamento para degradar/preparar a imagem.
     """
     print("\n" + "-" * 60)
     print("            PRÉ-PROCESSAMENTO DIDÁTICO DA IMAGEM              ")
@@ -222,7 +212,6 @@ def menu_pre_processamento(img_original):
 
     return img_original
 
-
 def selecionar_operacao():
     """Exibe o menu de operações e retorna (opcao, nome_exibicao, nome_slug)."""
     print("\n" + "-" * 60)
@@ -249,7 +238,6 @@ def selecionar_operacao():
             return opcao, nome_exib, slug
         print("[!] Opção inválida. Digite um número de 1 a 5.")
 
-
 def obter_parametros_linear_mapping(r_min, r_max):
     """Solicita os parâmetros de entrada [a, b] e saída [c, d] para Linear Mapping."""
     print("\nConfiguração dos limites [a, b] -> [c, d]:")
@@ -266,9 +254,7 @@ def obter_parametros_linear_mapping(r_min, r_max):
     d = float(entrada_d) if entrada_d else 255.0
     return a, b, c, d
 
-
 def executar_operacao(opcao, img_f, r_min, r_max):
-    """Encaminha a execução do algoritmo correspondente à opção escolhida."""
     if opcao == "1":
         return stretching(img_f, r_min, r_max)
     if opcao == "2":
@@ -285,7 +271,6 @@ def executar_operacao(opcao, img_f, r_min, r_max):
         beta = float(entrada_beta) if entrada_beta else 40.0
         return ajustar_brilho(img_f, beta=beta)
     return img_f.astype(np.uint8)
-
 
 def main():
     print("=" * 60)
@@ -316,7 +301,6 @@ def main():
 
     print("[i] Exibindo comparação: Imagem de Entrada vs Imagem Processada (Etapa 2)...")
     plotar_comparacao_2x2(img_trabalho, res_img, "Entrada do Algoritmo", f"Resultado: {nome_exibicao}")
-
 
 if __name__ == "__main__":
     main()
